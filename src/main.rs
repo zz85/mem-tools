@@ -1,11 +1,14 @@
 use byteorder::{LittleEndian, ReadBytesExt};
 use clap::{Arg, Command};
 use colored::*;
+use memmap2::MmapOptions;
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::{BufRead, BufReader, Seek, SeekFrom};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+
+mod tui;
 
 // Helper function to estimate total pages from /proc/meminfo
 fn get_estimated_total_pages() -> Result<u64, Box<dyn std::error::Error>> {
@@ -31,7 +34,7 @@ fn get_estimated_total_pages() -> Result<u64, Box<dyn std::error::Error>> {
 }
 
 // Page flag definitions with categories
-const PAGE_FLAGS: &[(u64, &str, &str, FlagCategory)] = &[
+pub const PAGE_FLAGS: &[(u64, &str, &str, FlagCategory)] = &[
     (1 << 0, "LOCKED", "Page is locked", FlagCategory::State),
     (1 << 1, "ERROR", "Page has error", FlagCategory::Error),
     (
@@ -149,7 +152,7 @@ const PAGE_FLAGS: &[(u64, &str, &str, FlagCategory)] = &[
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-enum FlagCategory {
+pub enum FlagCategory {
     State,      // Page state flags
     Memory,     // Memory management flags
     Usage,      // Usage tracking flags
@@ -160,8 +163,8 @@ enum FlagCategory {
     Error,      // Error flags
 }
 
-#[derive(Debug)]
-struct PageInfo {
+#[derive(Debug, Clone)]
+pub struct PageInfo {
     pfn: u64,
     flags: u64,
 }
@@ -221,12 +224,12 @@ impl PageInfo {
     }
 }
 
-struct KPageFlagsReader {
+pub struct KPageFlagsReader {
     file: BufReader<File>,
 }
 
 impl KPageFlagsReader {
-    fn new() -> Result<Self, Box<dyn std::error::Error>> {
+    pub fn new() -> Result<Self, Box<dyn std::error::Error>> {
         let file = File::open("/proc/kpageflags")?;
         Ok(Self {
             file: BufReader::new(file),
@@ -344,7 +347,7 @@ impl KPageFlagsReader {
         }
     }
 
-    fn read_range(
+    pub fn read_range(
         &mut self,
         start_pfn: u64,
         count: u64,
@@ -592,7 +595,7 @@ fn get_flag_category_color(flag_name: &str) -> colored::Color {
     colored::Color::White // Default
 }
 
-fn get_category_symbol_and_color(category: FlagCategory) -> (char, colored::Color) {
+pub fn get_category_symbol_and_color(category: FlagCategory) -> (char, colored::Color) {
     match category {
         FlagCategory::State => ('S', colored::Color::Blue),
         FlagCategory::Memory => ('M', colored::Color::Green),
@@ -698,7 +701,8 @@ fn print_category_summary(pages: &[PageInfo]) {
     }
 }
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Set up Ctrl-C handler
     let interrupt_flag = Arc::new(AtomicBool::new(false));
     let interrupt_flag_clone = interrupt_flag.clone();
@@ -766,6 +770,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .help("Show histogram visualization in summary")
                 .action(clap::ArgAction::SetTrue),
         )
+        .arg(
+            Arg::new("tui")
+                .long("tui")
+                .help("Launch interactive TUI mode")
+                .action(clap::ArgAction::SetTrue),
+        )
         .get_matches();
 
     // Parse arguments
@@ -793,6 +803,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let summary_only = matches.get_flag("summary");
     let show_grid = matches.get_flag("grid");
     let show_histogram = matches.get_flag("histogram");
+    let tui_mode = matches.get_flag("tui");
     let grid_width: usize = matches.get_one::<String>("width").unwrap().parse()?;
     let output_limit: usize = matches.get_one::<String>("limit").unwrap().parse()?;
 
@@ -803,6 +814,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "Error: /proc/kpageflags not found. Make sure you're running on Linux.".red()
         );
         return Ok(());
+    }
+
+    // Launch TUI mode if requested
+    if tui_mode {
+        println!("{}", "Launching KPageFlags TUI...".green().bold());
+        return tui::run_tui().await;
     }
 
     println!("{}", "KPageFlags Visualizer".blue().bold());

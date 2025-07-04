@@ -8,3 +8,7 @@ clap = { version = "4.0", features = ["derive"] }
 colored = "2.0"
 byteorder = "1.4"
 ctrlc = "3.4"
+memmap2 = "0.9"
+crossterm = "0.27"
+ratatui = "0.24"
+tokio = { version = "1.0", features = ["full"] }
