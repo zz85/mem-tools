@@ -411,7 +411,7 @@ fn print_page_info(page: &PageInfo, verbose: bool) {
     }
 }
 
-fn print_summary(pages: &[PageInfo]) {
+fn print_summary(pages: &[PageInfo], show_histogram: bool) {
     let mut flag_counts: HashMap<&str, u32> = HashMap::new();
     let mut total_pages = 0;
     let mut pages_with_flags = 0;
@@ -441,8 +441,8 @@ fn print_summary(pages: &[PageInfo]) {
         let mut sorted_flags: Vec<_> = flag_counts.iter().collect();
         sorted_flags.sort_by(|a, b| b.1.cmp(a.1));
 
-        for (flag, count) in sorted_flags {
-            let percentage = (*count as f64 / total_pages as f64) * 100.0;
+        for (flag, count) in sorted_flags.iter() {
+            let percentage = (**count as f64 / total_pages as f64) * 100.0;
             println!(
                 "  {}: {} ({:.1}%)",
                 flag.green().bold(),
@@ -450,10 +450,113 @@ fn print_summary(pages: &[PageInfo]) {
                 percentage.to_string().yellow()
             );
         }
+
+        // Show histogram if requested
+        if show_histogram {
+            let histogram_data: Vec<(&str, u32)> = sorted_flags
+                .iter()
+                .map(|(name, count)| (**name, **count))
+                .collect();
+            print_histogram(&histogram_data, total_pages);
+        }
     }
 
     // Add category summary
     print_category_summary(pages);
+}
+
+fn print_histogram(sorted_flags: &[(&str, u32)], total_pages: u32) {
+    println!("\n{}", "=== HISTOGRAM ===".blue().bold());
+
+    // Calculate the maximum count for scaling
+    let max_count = sorted_flags
+        .iter()
+        .map(|(_, count)| *count)
+        .max()
+        .unwrap_or(1);
+    let histogram_width = 60; // Width of the histogram bars
+
+    // Take top 15 flags to avoid cluttering
+    let top_flags = if sorted_flags.len() > 15 {
+        &sorted_flags[..15]
+    } else {
+        sorted_flags
+    };
+
+    for (flag, count) in top_flags {
+        let count_val = *count;
+        let percentage = (count_val as f64 / total_pages as f64) * 100.0;
+
+        // Calculate bar length (minimum 1 if count > 0)
+        let bar_length = if count_val == 0 {
+            0
+        } else {
+            std::cmp::max(
+                1,
+                (count_val as f64 / max_count as f64 * histogram_width as f64) as usize,
+            )
+        };
+
+        // Create the bar with different colors based on flag category
+        let bar_char = get_flag_category_char(flag);
+        let bar_color = get_flag_category_color(flag);
+        let bar = bar_char.repeat(bar_length).color(bar_color);
+
+        // Format the line
+        println!(
+            "{:>12} │{:<60} │ {} ({:.1}%)",
+            flag.green().bold(),
+            bar,
+            count_val.to_string().white(),
+            percentage.to_string().yellow()
+        );
+    }
+
+    if sorted_flags.len() > 15 {
+        println!(
+            "  {} (showing top 15 of {} flags)",
+            "...".dimmed(),
+            sorted_flags.len()
+        );
+    }
+
+    // Add a scale reference
+    println!("\n{}", "Scale:".dimmed());
+    println!(
+        "  {} = {} pages",
+        "█".repeat(10).white(),
+        (max_count / 6).to_string().dimmed()
+    );
+}
+
+fn get_flag_category_char(flag_name: &str) -> &'static str {
+    // Find the flag category and return appropriate character
+    for (_, name, _, category) in PAGE_FLAGS {
+        if *name == flag_name {
+            return match category {
+                FlagCategory::State => "█",      // Solid block
+                FlagCategory::Memory => "▓",     // Dark shade
+                FlagCategory::Usage => "▒",      // Medium shade
+                FlagCategory::Allocation => "░", // Light shade
+                FlagCategory::IO => "▄",         // Lower half block
+                FlagCategory::Structure => "▀",  // Upper half block
+                FlagCategory::Special => "■",    // Small solid square
+                FlagCategory::Error => "▬",      // Horizontal bar
+            };
+        }
+    }
+    "█" // Default
+}
+
+fn get_flag_category_color(flag_name: &str) -> colored::Color {
+    // Find the flag category and return appropriate color
+    for (_, name, _, category) in PAGE_FLAGS {
+        if *name == flag_name {
+            let (_, color) = get_category_symbol_and_color(*category);
+            return color;
+        }
+    }
+    colored::Color::White // Default
 }
 
 fn get_category_symbol_and_color(category: FlagCategory) -> (char, colored::Color) {
@@ -617,6 +720,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .help("Grid width for visualization")
                 .default_value("80"),
         )
+        .arg(
+            Arg::new("histogram")
+                .long("histogram")
+                .help("Show histogram visualization in summary")
+                .action(clap::ArgAction::SetTrue),
+        )
         .get_matches();
 
     // Parse arguments
@@ -643,6 +752,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let verbose = matches.get_flag("verbose");
     let summary_only = matches.get_flag("summary");
     let show_grid = matches.get_flag("grid");
+    let show_histogram = matches.get_flag("histogram");
     let grid_width: usize = matches.get_one::<String>("width").unwrap().parse()?;
     let output_limit: usize = matches.get_one::<String>("limit").unwrap().parse()?;
 
@@ -740,7 +850,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // Always show summary
-    print_summary(&pages);
+    print_summary(&pages, show_histogram);
 
     // Show grid visualization if requested
     if show_grid {

@@ -59,6 +59,7 @@ cargo run -- --grid --width 60
 - `-g, --grid`: Show enhanced grid visualization with flag categories
 - `-w, --width <WIDTH>`: Grid width for visualization (default: 80)
 - `-l, --limit <LIMIT>`: Limit individual page output for large datasets (default: 1000)
+- `--histogram`: Show histogram visualization in summary
 
 ### Examples
 
@@ -74,6 +75,12 @@ cargo run -- -c 10 --verbose
 
 # Quick overview of all available pages
 cargo run -- --summary --grid --width 120
+
+# Show histogram of flag distribution for fast analysis
+cargo run -- --summary --histogram
+
+# Combine histogram with grid for comprehensive visualization
+cargo run -- --summary --histogram --grid
 ```
 
 ## Enhanced Visualization
