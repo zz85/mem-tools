@@ -5,12 +5,15 @@ A Rust program to visualize Linux kernel page flags from `/proc/kpageflags`.
 ## Features
 
 - Read and parse `/proc/kpageflags` data
+- **Analyze all available pages by default**
 - Display page frame numbers (PFNs) and their associated flags
-- Colorized output for better readability
+- **Enhanced colorized visualization with flag categories**
 - Summary statistics showing flag distribution
-- Grid visualization for pattern recognition
+- **Category-based grid visualization** showing different flag types
 - Support for hex and decimal PFN input
 - Verbose mode with detailed flag descriptions
+- **Progress indication for large datasets**
+- **Output limiting for manageable display**
 
 ## Requirements
 
@@ -28,43 +31,67 @@ cargo build --release
 
 ### Basic usage
 ```bash
-# Analyze first 100 pages
+# Analyze ALL available pages (default)
 cargo run
+
+# Analyze first 100 pages
+cargo run -- --count 100
 
 # Analyze 50 pages starting from PFN 0x1000
 cargo run -- --start 0x1000 --count 50
 
-# Show verbose descriptions
+# Show verbose descriptions (limited output for readability)
 cargo run -- --verbose
 
-# Show only summary
+# Show only summary for all pages
 cargo run -- --summary
 
-# Show grid visualization
+# Show enhanced grid visualization with flag categories
 cargo run -- --grid --width 60
 ```
 
 ### Command line options
 
 - `-s, --start <PFN>`: Starting page frame number (hex with 0x prefix or decimal)
-- `-c, --count <COUNT>`: Number of pages to analyze (default: 100)
+- `-c, --count <COUNT>`: Number of pages to analyze (use 'all' for all available pages, default: 'all')
 - `-v, --verbose`: Show detailed flag descriptions
 - `--summary`: Show only summary statistics
-- `-g, --grid`: Show grid visualization
+- `-g, --grid`: Show enhanced grid visualization with flag categories
 - `-w, --width <WIDTH>`: Grid width for visualization (default: 80)
+- `-l, --limit <LIMIT>`: Limit individual page output for large datasets (default: 1000)
 
 ### Examples
 
 ```bash
+# Analyze all pages with summary and grid
+cargo run -- --summary --grid
+
 # Analyze memory around a specific address
 cargo run -- -s 0x10000 -c 200 --grid
 
 # Get detailed information about first 10 pages
 cargo run -- -c 10 --verbose
 
-# Quick overview of a large range
-cargo run -- -s 0 -c 1000 --summary --grid
+# Quick overview of all available pages
+cargo run -- --summary --grid --width 120
 ```
+
+## Enhanced Visualization
+
+The program now provides **category-based visualization** with different symbols and colors for different flag types:
+
+### Flag Categories
+
+- **S** (Blue) - **State flags**: LOCKED, DIRTY, UPTODATE, etc.
+- **M** (Green) - **Memory management**: LRU, ACTIVE, RECLAIM, etc.
+- **U** (Yellow) - **Usage tracking**: REFERENCED, ANON, IDLE, etc.
+- **A** (Cyan) - **Allocation type**: BUDDY, SLAB
+- **I** (Magenta) - **I/O related**: WRITEBACK
+- **T** (Red) - **Structure**: HUGE, THP, COMPOUND_HEAD/TAIL
+- **P** (White) - **Special purpose**: KSM, ZERO_PAGE, PGTABLE
+- **E** (Bright Red) - **Error flags**: ERROR, HWPOISON
+- **●** (Bright White) - **Multiple categories**
+- **.** (Dimmed) - **No flags**
 
 ## Page Flags
 
@@ -97,6 +124,7 @@ The program recognizes the following page flags:
 - **ZERO_PAGE**: Zero page
 - **IDLE**: Page is idle
 - **PGTABLE**: Page table page
+- **RESERVED**: Reserved page (common in early memory)
 
 ## Output Format
 
@@ -109,24 +137,41 @@ PFN: 0x1235 Flags: 0x0000000000000068
   UPTODATE, LRU, ACTIVE
 ```
 
-### Summary Statistics
+### Enhanced Summary Statistics
 ```
 === SUMMARY ===
-Total pages analyzed: 100
-Pages with flags: 45
-Pages without flags: 55
+Total pages analyzed: 1048576
+Pages with flags: 524288
+Pages without flags: 524288
 
 Flag distribution:
-  LRU: 30 (30.0%)
-  UPTODATE: 25 (25.0%)
-  ACTIVE: 20 (20.0%)
+  BUDDY: 300000 (28.6%)
+  RESERVED: 100000 (9.5%)
+  LRU: 50000 (4.8%)
+
+Flag categories:
+  A Allocation: 300000 (28.6%)
+  S State: 150000 (14.3%)
+  M Memory: 74288 (7.1%)
 ```
 
-### Grid Visualization
+### Enhanced Grid Visualization
 ```
 === FLAG VISUALIZATION ===
-Legend: . = no flags, ● = has flags, ● = multiple flags
-..●●.●●●..●.●●●●●●●●●●●●●●●●●●●●●●●●●●●●●●●●●●●●●●●●●●●●●●●●●●●●●●●●●●●●●●●●●●●●●●
+Legend:
+  . = no flags
+  S = State flags (LOCKED, DIRTY, etc.)
+  M = Memory mgmt (LRU, ACTIVE, etc.)
+  U = Usage tracking (REFERENCED, ANON, etc.)
+  A = Allocation (BUDDY, SLAB)
+  I = I/O related (WRITEBACK)
+  T = Structure (HUGE, THP, etc.)
+  P = Special (KSM, ZERO_PAGE, etc.)
+  E = Error flags (ERROR, HWPOISON)
+  ● = Multiple categories
+
+SSSSSSSSSSSSSSSSAAAAAAAAAAAAAAAAAAAAMMMMMMMMMMUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUU
+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
 ```
 
 ## Permissions
@@ -134,8 +179,15 @@ Legend: . = no flags, ● = has flags, ● = multiple flags
 You may need to run with elevated privileges:
 
 ```bash
-sudo cargo run -- --start 0x1000 --count 100
+sudo cargo run -- --summary --grid
 ```
+
+## Performance Notes
+
+- **Large datasets**: When analyzing all pages (potentially millions), the program automatically limits individual page output to 1000 entries by default
+- **Progress indication**: Shows progress for datasets larger than 10,000 pages
+- **Memory efficient**: Processes pages in chunks to handle large memory systems
+- Use `--summary` flag for fastest analysis of large datasets
 
 ## Notes
 
@@ -143,3 +195,4 @@ sudo cargo run -- --start 0x1000 --count 100
 - PFN (Page Frame Number) represents physical memory pages
 - Not all PFNs may have corresponding entries in kpageflags
 - The program handles missing entries gracefully
+- **Default behavior now analyzes ALL available pages** for comprehensive system overview
