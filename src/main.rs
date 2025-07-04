@@ -1,7 +1,6 @@
 use byteorder::{LittleEndian, ReadBytesExt};
 use clap::{Arg, Command};
 use colored::*;
-use memmap2::MmapOptions;
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::{BufRead, BufReader, Seek, SeekFrom};
@@ -224,33 +223,13 @@ impl PageInfo {
 
 struct KPageFlagsReader {
     file: BufReader<File>,
-    mmap: Option<memmap2::Mmap>,
-    use_mmap: bool,
 }
 
 impl KPageFlagsReader {
     fn new() -> Result<Self, Box<dyn std::error::Error>> {
         let file = File::open("/proc/kpageflags")?;
-
-        // Try to create memory map
-        let (mmap, use_mmap) = match unsafe { MmapOptions::new().map(&file) } {
-            Ok(mmap) => {
-                println!("{}", "Using memory-mapped I/O for faster access".green());
-                (Some(mmap), true)
-            }
-            Err(e) => {
-                println!(
-                    "{}",
-                    format!("Memory mapping failed ({}), falling back to regular I/O", e).yellow()
-                );
-                (None, false)
-            }
-        };
-
         Ok(Self {
             file: BufReader::new(file),
-            mmap,
-            use_mmap,
         })
     }
 
@@ -261,115 +240,6 @@ impl KPageFlagsReader {
     }
 
     fn read_all_pages(
-        &mut self,
-        start_pfn: u64,
-        interrupt_flag: Arc<AtomicBool>,
-    ) -> Result<Vec<PageInfo>, Box<dyn std::error::Error>> {
-        if self.use_mmap {
-            self.read_all_pages_mmap(start_pfn, interrupt_flag)
-        } else {
-            self.read_all_pages_regular(start_pfn, interrupt_flag)
-        }
-    }
-
-    fn read_all_pages_mmap(
-        &self,
-        start_pfn: u64,
-        interrupt_flag: Arc<AtomicBool>,
-    ) -> Result<Vec<PageInfo>, Box<dyn std::error::Error>> {
-        let mut pages = Vec::new();
-
-        if let Some(ref mmap) = self.mmap {
-            let start_offset = (start_pfn * 8) as usize;
-            let total_entries = (mmap.len() - start_offset) / 8;
-
-            // Get estimated total for progress reporting
-            let estimated_total = get_estimated_total_pages().unwrap_or(1048576);
-            println!(
-                "Reading all available pages starting from PFN 0x{:x}...",
-                start_pfn
-            );
-            println!(
-                "Estimated total pages in system: ~{}",
-                estimated_total.to_string().cyan()
-            );
-            println!("{}", "Using memory-mapped I/O for maximum speed".green());
-            println!(
-                "{}",
-                "Press Ctrl-C to stop and show summary of pages scanned so far".yellow()
-            );
-
-            // Process in chunks for better interrupt responsiveness and progress reporting
-            const CHUNK_SIZE: usize = 10000;
-            let mut pfn = start_pfn;
-
-            for chunk_start in (0..total_entries).step_by(CHUNK_SIZE) {
-                // Check for interrupt
-                if interrupt_flag.load(Ordering::Relaxed) {
-                    println!(
-                        "\n{}",
-                        "Interrupt received! Stopping scan and showing summary..."
-                            .yellow()
-                            .bold()
-                    );
-                    break;
-                }
-
-                let chunk_end = std::cmp::min(chunk_start + CHUNK_SIZE, total_entries);
-
-                // Process chunk
-                for i in chunk_start..chunk_end {
-                    let byte_offset = start_offset + i * 8;
-                    if byte_offset + 8 <= mmap.len() {
-                        let bytes = &mmap[byte_offset..byte_offset + 8];
-                        let flags = u64::from_le_bytes([
-                            bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6],
-                            bytes[7],
-                        ]);
-                        pages.push(PageInfo::new(pfn, flags));
-                        pfn += 1;
-                    }
-                }
-
-                // Show progress every 50,000 pages
-                if pages.len() % 50000 == 0 && pages.len() > 0 {
-                    let progress = if estimated_total > 0 {
-                        format!(
-                            " ({:.1}%)",
-                            (pages.len() as f64 / estimated_total as f64) * 100.0
-                        )
-                    } else {
-                        String::new()
-                    };
-                    println!(
-                        "Read {} pages so far{}",
-                        pages.len().to_string().green(),
-                        progress.yellow()
-                    );
-                }
-
-                // Safety check: don't read more than 100M pages (400GB of memory)
-                if pages.len() > 100_000_000 {
-                    println!(
-                        "{}",
-                        "Warning: Reached safety limit of 100M pages. Stopping.".yellow()
-                    );
-                    break;
-                }
-            }
-        }
-
-        let status_msg = if interrupt_flag.load(Ordering::Relaxed) {
-            format!("Scan interrupted - successfully read {} pages", pages.len())
-        } else {
-            format!("Successfully read {} total pages", pages.len())
-        };
-
-        println!("{}", status_msg.green().bold());
-        Ok(pages)
-    }
-
-    fn read_all_pages_regular(
         &mut self,
         start_pfn: u64,
         interrupt_flag: Arc<AtomicBool>,
@@ -406,7 +276,7 @@ impl KPageFlagsReader {
                 break;
             }
 
-            match self.read_page_flags_regular(pfn) {
+            match self.read_page_flags(pfn) {
                 Ok(Some(flags)) => {
                     pages.push(PageInfo::new(pfn, flags));
                     consecutive_failures = 0;
@@ -464,38 +334,6 @@ impl KPageFlagsReader {
     }
 
     fn read_page_flags(&mut self, pfn: u64) -> Result<Option<u64>, Box<dyn std::error::Error>> {
-        if self.use_mmap {
-            self.read_page_flags_mmap(pfn)
-        } else {
-            self.read_page_flags_regular(pfn)
-        }
-    }
-
-    fn read_page_flags_mmap(&self, pfn: u64) -> Result<Option<u64>, Box<dyn std::error::Error>> {
-        if let Some(ref mmap) = self.mmap {
-            let offset = (pfn * 8) as usize;
-            if offset + 8 <= mmap.len() {
-                let bytes = &mmap[offset..offset + 8];
-                // Convert 8 bytes to u64 in little-endian format
-                let flags = u64::from_le_bytes([
-                    bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
-                ]);
-                Ok(Some(flags))
-            } else {
-                Ok(None) // Beyond file bounds
-            }
-        } else {
-            // This shouldn't happen if use_mmap is true, but fallback anyway
-            // We can't call read_page_flags_regular here because it needs &mut self
-            // This is a fallback that shouldn't be reached
-            Ok(None)
-        }
-    }
-
-    fn read_page_flags_regular(
-        &mut self,
-        pfn: u64,
-    ) -> Result<Option<u64>, Box<dyn std::error::Error>> {
         let offset = pfn * 8; // Each entry is 8 bytes
         self.file.seek(SeekFrom::Start(offset))?;
 
@@ -507,68 +345,6 @@ impl KPageFlagsReader {
     }
 
     fn read_range(
-        &mut self,
-        start_pfn: u64,
-        count: u64,
-        interrupt_flag: Arc<AtomicBool>,
-    ) -> Result<Vec<PageInfo>, Box<dyn std::error::Error>> {
-        if self.use_mmap {
-            self.read_range_mmap(start_pfn, count, interrupt_flag)
-        } else {
-            self.read_range_regular(start_pfn, count, interrupt_flag)
-        }
-    }
-
-    fn read_range_mmap(
-        &self,
-        start_pfn: u64,
-        count: u64,
-        interrupt_flag: Arc<AtomicBool>,
-    ) -> Result<Vec<PageInfo>, Box<dyn std::error::Error>> {
-        let mut pages = Vec::new();
-
-        if let Some(ref mmap) = self.mmap {
-            let start_offset = (start_pfn * 8) as usize;
-            let max_entries = std::cmp::min(count as usize, (mmap.len() - start_offset) / 8);
-
-            // Process in chunks for better interrupt responsiveness
-            const CHUNK_SIZE: usize = 1000;
-            let mut pfn = start_pfn;
-
-            for chunk_start in (0..max_entries).step_by(CHUNK_SIZE) {
-                // Check for interrupt
-                if interrupt_flag.load(Ordering::Relaxed) {
-                    println!(
-                        "\n{}",
-                        "Interrupt received! Stopping scan and showing summary..."
-                            .yellow()
-                            .bold()
-                    );
-                    break;
-                }
-
-                let chunk_end = std::cmp::min(chunk_start + CHUNK_SIZE, max_entries);
-
-                // Process chunk
-                for i in chunk_start..chunk_end {
-                    let byte_offset = start_offset + i * 8;
-                    if byte_offset + 8 <= mmap.len() {
-                        let bytes = &mmap[byte_offset..byte_offset + 8];
-                        let flags = u64::from_le_bytes([
-                            bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6],
-                            bytes[7],
-                        ]);
-                        pages.push(PageInfo::new(pfn, flags));
-                        pfn += 1;
-                    }
-                }
-            }
-        }
-
-        Ok(pages)
-    }
-
-    fn read_range_regular(
         &mut self,
         start_pfn: u64,
         count: u64,
@@ -590,7 +366,7 @@ impl KPageFlagsReader {
                 break;
             }
 
-            match self.read_page_flags_regular(pfn) {
+            match self.read_page_flags(pfn) {
                 Ok(Some(flags)) => {
                     pages.push(PageInfo::new(pfn, flags));
                     consecutive_failures = 0;

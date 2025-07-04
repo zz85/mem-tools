@@ -191,16 +191,10 @@ sudo cargo run -- --summary --grid
 
 ## Performance Notes
 
-- **Memory-mapped I/O**: The program automatically attempts to use memory-mapped I/O for faster access to `/proc/kpageflags`. If mmap fails (common with `/proc` files), it gracefully falls back to regular I/O
 - **Large datasets**: When analyzing all pages (potentially millions), the program automatically limits individual page output to 1000 entries by default
 - **Progress indication**: Shows progress for datasets larger than 10,000 pages
 - **Memory efficient**: Processes pages in chunks to handle large memory systems
-- **Interrupt handling**: Press Ctrl-C to stop scanning and show summary of pages read so far
 - Use `--summary` flag for fastest analysis of large datasets
-- **Expected performance**: 
-  - With mmap: ~30-60 seconds for 1TB RAM systems (when supported)
-  - Without mmap: ~2-5 minutes for 1TB RAM systems
-  - Actual performance may be faster on modern systems
 
 ## Notes
 
