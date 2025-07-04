@@ -1,5 +1,5 @@
 use std::fs::File;
-use std::io::{BufReader, Read, Seek, SeekFrom};
+use std::io::{BufReader, Seek, SeekFrom};
 use std::collections::HashMap;
 use clap::{Arg, Command};
 use colored::*;
@@ -34,6 +34,8 @@ const PAGE_FLAGS: &[(u64, &str, &str)] = &[
     (1 << 24, "ZERO_PAGE",   "Zero page"),
     (1 << 25, "IDLE",        "Page is idle"),
     (1 << 26, "PGTABLE",     "Page table page"),
+    // Additional flags that might be present
+    (1 << 32, "RESERVED",    "Reserved page (common in early memory)"),
 ];
 
 #[derive(Debug)]
@@ -61,6 +63,19 @@ impl PageInfo {
             .filter(|(flag, _, _)| self.flags & flag != 0)
             .map(|(_, name, desc)| (*name, *desc))
             .collect()
+    }
+
+    fn get_unknown_flags(&self) -> Vec<u8> {
+        let known_flags: u64 = PAGE_FLAGS.iter().map(|(flag, _, _)| flag).sum();
+        let unknown_flags = self.flags & !known_flags;
+        
+        let mut unknown_bits = Vec::new();
+        for bit in 0..64 {
+            if unknown_flags & (1 << bit) != 0 {
+                unknown_bits.push(bit);
+            }
+        }
+        unknown_bits
     }
 }
 
@@ -112,15 +127,40 @@ fn print_page_info(page: &PageInfo, verbose: bool) {
     }
 
     let flag_info = page.get_flag_descriptions();
+    let unknown_flags = page.get_unknown_flags();
     
     if verbose {
         for (name, desc) in flag_info {
             println!("  {} - {}", name.green().bold(), desc.white());
         }
+        if !unknown_flags.is_empty() {
+            for bit in unknown_flags {
+                println!("  {} - {}", 
+                    format!("UNKNOWN_BIT_{}", bit).red().bold(), 
+                    "Unknown flag bit".dimmed()
+                );
+            }
+        }
     } else {
-        let flag_names = page.get_flag_names();
-        if !flag_names.is_empty() {
-            println!("  {}", flag_names.join(", ").green());
+        let mut all_flags = page.get_flag_names();
+        for bit in unknown_flags {
+            all_flags.push(Box::leak(format!("UNKNOWN_BIT_{}", bit).into_boxed_str()));
+        }
+        if !all_flags.is_empty() {
+            let known_flags = all_flags.iter()
+                .filter(|f| !f.starts_with("UNKNOWN"))
+                .map(|s| s.green())
+                .collect::<Vec<_>>();
+            let unknown_flags_colored = all_flags.iter()
+                .filter(|f| f.starts_with("UNKNOWN"))
+                .map(|s| s.red())
+                .collect::<Vec<_>>();
+            
+            let mut display_flags = Vec::new();
+            display_flags.extend(known_flags.iter().map(|f| f.to_string()));
+            display_flags.extend(unknown_flags_colored.iter().map(|f| f.to_string()));
+            
+            println!("  {}", display_flags.join(", "));
         }
     }
 }
