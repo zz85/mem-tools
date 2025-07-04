@@ -7,3 +7,4 @@ edition = "2021"
 clap = { version = "4.0", features = ["derive"] }
 colored = "2.0"
 byteorder = "1.4"
+ctrlc = "3.4"

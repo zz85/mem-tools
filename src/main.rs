@@ -4,6 +4,8 @@ use colored::*;
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::{BufRead, BufReader, Seek, SeekFrom};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 
 // Helper function to estimate total pages from /proc/meminfo
 fn get_estimated_total_pages() -> Result<u64, Box<dyn std::error::Error>> {
@@ -240,6 +242,7 @@ impl KPageFlagsReader {
     fn read_all_pages(
         &mut self,
         start_pfn: u64,
+        interrupt_flag: Arc<AtomicBool>,
     ) -> Result<Vec<PageInfo>, Box<dyn std::error::Error>> {
         let mut pages = Vec::new();
         let mut pfn = start_pfn;
@@ -256,8 +259,23 @@ impl KPageFlagsReader {
             "Estimated total pages in system: ~{}",
             estimated_total.to_string().cyan()
         );
+        println!(
+            "{}",
+            "Press Ctrl-C to stop and show summary of pages scanned so far".yellow()
+        );
 
         loop {
+            // Check for interrupt signal every 1000 pages
+            if pages.len() % 1000 == 0 && interrupt_flag.load(Ordering::Relaxed) {
+                println!(
+                    "\n{}",
+                    "Interrupt received! Stopping scan and showing summary..."
+                        .yellow()
+                        .bold()
+                );
+                break;
+            }
+
             match self.read_page_flags(pfn) {
                 Ok(Some(flags)) => {
                     pages.push(PageInfo::new(pfn, flags));
@@ -305,10 +323,13 @@ impl KPageFlagsReader {
             }
         }
 
-        println!(
-            "Successfully read {} total pages",
-            pages.len().to_string().green().bold()
-        );
+        let status_msg = if interrupt_flag.load(Ordering::Relaxed) {
+            format!("Scan interrupted - successfully read {} pages", pages.len())
+        } else {
+            format!("Successfully read {} total pages", pages.len())
+        };
+
+        println!("{}", status_msg.green().bold());
         Ok(pages)
     }
 
@@ -327,12 +348,24 @@ impl KPageFlagsReader {
         &mut self,
         start_pfn: u64,
         count: u64,
+        interrupt_flag: Arc<AtomicBool>,
     ) -> Result<Vec<PageInfo>, Box<dyn std::error::Error>> {
         let mut pages = Vec::new();
         let mut consecutive_failures = 0;
         const MAX_CONSECUTIVE_FAILURES: u32 = 1000; // Stop after 1000 consecutive failures
 
         for pfn in start_pfn..start_pfn + count {
+            // Check for interrupt signal every 1000 pages
+            if pages.len() % 1000 == 0 && interrupt_flag.load(Ordering::Relaxed) {
+                println!(
+                    "\n{}",
+                    "Interrupt received! Stopping scan and showing summary..."
+                        .yellow()
+                        .bold()
+                );
+                break;
+            }
+
             match self.read_page_flags(pfn) {
                 Ok(Some(flags)) => {
                     pages.push(PageInfo::new(pfn, flags));
@@ -666,6 +699,13 @@ fn print_category_summary(pages: &[PageInfo]) {
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Set up Ctrl-C handler
+    let interrupt_flag = Arc::new(AtomicBool::new(false));
+    let interrupt_flag_clone = interrupt_flag.clone();
+
+    ctrlc::set_handler(move || {
+        interrupt_flag_clone.store(true, Ordering::Relaxed);
+    })?;
     let matches = Command::new("kpageflags-visualizer")
         .about("Visualize Linux kernel page flags from /proc/kpageflags")
         .arg(
@@ -775,7 +815,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             start_pfn
         );
         println!("{}", "=".repeat(50).blue());
-        reader.read_all_pages(start_pfn)?
+        reader.read_all_pages(start_pfn, interrupt_flag.clone())?
     } else {
         println!(
             "Analyzing {} pages starting from PFN 0x{:x}",
@@ -799,9 +839,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 "{}",
                 "Reading page flags... (this may take a moment for large datasets)".yellow()
             );
+            println!(
+                "{}",
+                "Press Ctrl-C to stop and show summary of pages scanned so far".yellow()
+            );
         }
 
-        reader.read_range(start_pfn, count)?
+        reader.read_range(start_pfn, count, interrupt_flag.clone())?
     };
 
     if pages.is_empty() {
