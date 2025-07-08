@@ -2,284 +2,250 @@ use linux_memory_monitor::*;
 use std::fs::File;
 use std::io::Write;
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 fn main() -> Result<()> {
-    println!("Linux Memory Monitor - Page Cache Analysis Tool");
-    println!("===============================================\n");
+    println!("Linux Memory Monitor - Continuous Inactive Memory Generation");
+    println!("===========================================================\n");
 
-    // Show current memory state
-    show_current_memory_state()?;
+    let interval = Duration::from_secs(3); // Stats interval (not used for pausing anymore)
+    let mut file_counter = 0;
+    let file_size_gb = 1; // Create 1GB files each time
+    let max_files = 20; // Maximum number of files to create before cleanup
+    let target_inactive_gb = 50; // Stop after generating this much new inactive memory
 
-    // Demonstrate file I/O impact on memory
-    demonstrate_file_io_impact()?;
-
-    // Monitor memory continuously
-    demonstrate_continuous_monitoring()?;
-
-    // Test memory pressure scenarios
-    demonstrate_memory_pressure_analysis()?;
-
-    Ok(())
-}
-
-fn show_current_memory_state() -> Result<()> {
-    println!("📊 Current Memory State:");
-    println!("-----------------------");
-
-    let stats = MemoryStats::current()?;
-    let pressure = MemoryPressure::current()?;
-
+    println!("Configuration:");
+    println!("  File size: {} GB per file", file_size_gb);
+    println!("  No pause between files - running at maximum speed!");
+    println!("  Max files before cleanup: {}", max_files);
     println!(
-        "Total Memory:      {:>15} KB ({:.1} GB)",
-        format_number(stats.mem_total),
-        stats.mem_total as f64 / 1024.0 / 1024.0
-    );
-    println!(
-        "Free Memory:       {:>15} KB ({:.1} GB)",
-        format_number(stats.mem_free),
-        stats.mem_free as f64 / 1024.0 / 1024.0
-    );
-    println!(
-        "Available Memory:  {:>15} KB ({:.1} GB)",
-        format_number(stats.mem_available),
-        stats.mem_available as f64 / 1024.0 / 1024.0
-    );
-    println!(
-        "Page Cache:        {:>15} KB ({:.1} GB)",
-        format_number(stats.page_cache_size()),
-        stats.page_cache_size() as f64 / 1024.0 / 1024.0
-    );
-    println!("  - Cached:        {:>15} KB", format_number(stats.cached));
-    println!("  - Buffers:       {:>15} KB", format_number(stats.buffers));
-    println!(
-        "Inactive(file):    {:>15} KB ({:.1} GB)",
-        format_number(stats.inactive_file),
-        stats.inactive_file as f64 / 1024.0 / 1024.0
-    );
-    println!(
-        "Active(file):      {:>15} KB ({:.1} GB)",
-        format_number(stats.active_file),
-        stats.active_file as f64 / 1024.0 / 1024.0
-    );
-    println!(
-        "Dirty Pages:       {:>15} KB ({:.1} MB)",
-        format_number(stats.dirty),
-        stats.dirty as f64 / 1024.0
-    );
-    println!(
-        "Writeback:         {:>15} KB",
-        format_number(stats.writeback)
+        "  Will stop after generating {} GB of new inactive memory\n",
+        target_inactive_gb
     );
 
-    println!("\n📈 Memory Pressure Analysis:");
-    println!(
-        "Available Ratio:   {:.1}%",
-        pressure.available_ratio * 100.0
-    );
-    println!("Cache Ratio:       {:.1}%", pressure.cache_ratio * 100.0);
-    println!("Dirty Ratio:       {:.3}%", pressure.dirty_ratio * 100.0);
-    println!("Pressure Level:    {:?}", pressure.pressure_level);
+    // Show initial state
+    let initial_stats = MemoryStats::current()?;
+    let initial_inactive_gb = initial_stats.inactive_file as f64 / (1024.0 * 1024.0);
+    print_memory_stats("INITIAL STATE", &initial_stats);
 
-    println!();
-    Ok(())
-}
+    let start_time = Instant::now();
+    let mut created_files = Vec::new();
+    let mut total_new_inactive = 0.0;
 
-fn demonstrate_file_io_impact() -> Result<()> {
-    println!("🔍 Demonstrating File I/O Impact on Memory:");
-    println!("--------------------------------------------");
+    loop {
+        // Create a large file to generate inactive memory
+        let file_path = format!("/tmp/inactive_mem_test_{}.dat", file_counter);
+        println!("\n🔄 Creating file: {} ({} GB)", file_path, file_size_gb);
 
-    let mut monitor = PageCacheMonitor::new()?;
-    let test_file = "/tmp/memory_test_file.dat";
-
-    // Create a test file (1GB)
-    println!("Creating 1GB test file...");
-    let analysis = FileOperations::write_file_and_analyze(
-        &mut monitor,
-        test_file,
-        &vec![0u8; 1024 * 1024 * 1024],
-    )?;
-
-    println!("Write operation impact: {}", analysis.summary());
-
-    if analysis.caused_cache_growth() {
-        println!("✅ File write caused page cache growth as expected");
-    } else {
-        println!("ℹ️  File write did not significantly impact page cache");
-    }
-
-    // Wait a moment and read the file
-    thread::sleep(Duration::from_millis(500));
-
-    println!("\nReading the test file...");
-    let read_analysis = FileOperations::read_file_and_analyze(&mut monitor, test_file)?;
-    println!("Read operation impact: {}", read_analysis.summary());
-
-    // Clean up
-    let _ = std::fs::remove_file(test_file);
-
-    // Show cache summary
-    let summary = monitor.get_cache_summary();
-    println!("\n📋 Page Cache Summary:");
-    println!(
-        "Initial cache: {} KB",
-        format_number(summary.initial_cache_kb)
-    );
-    println!(
-        "Final cache:   {} KB",
-        format_number(summary.final_cache_kb)
-    );
-    println!(
-        "Cache change:  {:+} KB",
-        format_signed_number(summary.cache_change_kb)
-    );
-    println!("Max cache:     {} KB", format_number(summary.max_cache_kb));
-    println!("Snapshots:     {}", summary.snapshot_count);
-
-    println!();
-    Ok(())
-}
-
-fn demonstrate_continuous_monitoring() -> Result<()> {
-    println!("⏱️  Continuous Memory Monitoring (10 seconds):");
-    println!("----------------------------------------------");
-
-    let mut monitor = ContinuousMonitor::new(100);
-    monitor.start(Duration::from_millis(500))?;
-
-    println!("Monitoring started... Creating some memory activity");
-
-    // Create some file I/O activity to observe
-    let test_files = ["/tmp/test1.dat", "/tmp/test2.dat", "/tmp/test3.dat"];
-
-    for (i, file_path) in test_files.iter().enumerate() {
-        thread::sleep(Duration::from_secs(1));
-
-        // Create files of different sizes
-        let size = (i + 1) * 100 * 1024 * 1024; // 100MB, 200MB, 300MB
-        let data = vec![i as u8; size];
-
-        if let Ok(mut file) = File::create(file_path) {
-            let _ = file.write_all(&data);
-            let _ = file.sync_all();
-            println!("Created file {} ({} MB)", file_path, size / 1024 / 1024);
-        }
-    }
-
-    // Wait for more samples
-    thread::sleep(Duration::from_secs(7));
-
-    monitor.stop();
-
-    // Analyze the trend
-    if let Some(trend) = monitor.get_trend_analysis(10) {
-        println!("\n📈 Trend Analysis (last 10 samples):");
-        println!("Duration: {} ms", trend.duration_ms);
-        println!("Samples: {}", trend.sample_count);
-
-        println!("\nMemory Trends:");
-        print_trend("Free Memory", &trend.memory_trends.free_memory_trend);
-        print_trend("Page Cache", &trend.cache_trends.page_cache_trend);
-        print_trend("Inactive(file)", &trend.cache_trends.inactive_file_trend);
-        print_trend("Dirty Pages", &trend.cache_trends.dirty_pages_trend);
-
-        println!("\nMemory Pressure Over Time:");
-        for (i, &pressure) in trend.pressure_changes.iter().enumerate() {
-            if i % 3 == 0 {
-                // Show every 3rd sample to avoid clutter
-                println!("  Sample {}: {:.1}% available", i, pressure * 100.0);
+        let create_start = Instant::now();
+        match create_large_file(&file_path, file_size_gb) {
+            Ok(_) => {
+                let create_duration = create_start.elapsed();
+                println!(
+                    "✅ File created in {:.2} seconds",
+                    create_duration.as_secs_f64()
+                );
+                created_files.push(file_path.clone());
+                file_counter += 1;
+            }
+            Err(e) => {
+                println!("❌ Failed to create file: {}", e);
+                break;
             }
         }
-    }
 
-    // Clean up test files
-    for file_path in &test_files {
-        let _ = std::fs::remove_file(file_path);
-    }
+        // Print current memory stats
+        let current_stats = MemoryStats::current()?;
+        print_memory_stats(&format!("AFTER FILE #{}", file_counter), &current_stats);
 
-    println!();
-    Ok(())
-}
+        // Calculate progress
+        let current_inactive_gb = current_stats.inactive_file as f64 / (1024.0 * 1024.0);
+        total_new_inactive = current_inactive_gb - initial_inactive_gb;
+        let total_runtime = start_time.elapsed();
 
-fn demonstrate_memory_pressure_analysis() -> Result<()> {
-    println!("🚨 Memory Pressure Event Monitoring:");
-    println!("------------------------------------");
-
-    let mut event_monitor = EventMonitor::new();
-    event_monitor.add_common_conditions();
-
-    // Add a custom condition for demonstration
-    event_monitor.add_condition("large_cache_change".to_string(), |stats, prev| {
-        if let Some(prev_stats) = prev {
-            let current_cache = stats.page_cache_size();
-            let prev_cache = prev_stats.page_cache_size();
-            (current_cache as i64 - prev_cache as i64).abs() > 50 * 1024 // 50MB change
-        } else {
-            false
-        }
-    });
-
-    println!("Monitoring for memory events...");
-
-    // Check conditions a few times
-    for i in 0..5 {
-        thread::sleep(Duration::from_secs(1));
-
-        let events = event_monitor.check_conditions()?;
-        if !events.is_empty() {
-            println!("🔔 Events triggered at check {}: {:?}", i + 1, events);
-        } else {
-            println!("✅ Check {}: No events triggered", i + 1);
-        }
-
-        // Show current memory pressure
-        let pressure = MemoryPressure::current()?;
+        println!("\n📊 PROGRESS SUMMARY:");
         println!(
-            "   Current pressure: {:?} ({:.1}% available)",
-            pressure.pressure_level,
-            pressure.available_ratio * 100.0
+            "  Runtime: {:.1} minutes",
+            total_runtime.as_secs_f64() / 60.0
         );
+        println!("  Files created: {}", file_counter);
+        println!(
+            "  Total file data written: {} GB",
+            file_counter * file_size_gb
+        );
+        println!("  Initial inactive(file): {:.1} GB", initial_inactive_gb);
+        println!("  Current inactive(file): {:.1} GB", current_inactive_gb);
+        println!("  🎯 NEW inactive memory: {:.1} GB", total_new_inactive);
+        println!(
+            "  Inactive memory ratio: {:.1}%",
+            current_stats.inactive_file as f64 / current_stats.mem_total as f64 * 100.0
+        );
+
+        // Check if we've reached our target
+        if total_new_inactive >= target_inactive_gb as f64 {
+            println!("\n🎉 TARGET ACHIEVED!");
+            println!(
+                "   Generated {:.1} GB of new inactive file memory!",
+                total_new_inactive
+            );
+            println!("   This demonstrates Linux's page cache behavior at scale.");
+            break;
+        }
+
+        // Check if we should clean up old files
+        if created_files.len() >= max_files {
+            println!("\n🧹 Cleaning up oldest files to prevent disk space issues...");
+            let files_to_remove = created_files.len() - (max_files / 2);
+            for _ in 0..files_to_remove {
+                if !created_files.is_empty() {
+                    let old_file = created_files.remove(0);
+                    if let Err(e) = std::fs::remove_file(&old_file) {
+                        println!("⚠️  Failed to remove {}: {}", old_file, e);
+                    } else {
+                        println!("🗑️  Removed: {}", old_file);
+                    }
+                }
+            }
+
+            // Show memory stats after cleanup
+            thread::sleep(Duration::from_millis(500)); // Let kernel react
+            let after_cleanup = MemoryStats::current()?;
+            print_memory_stats("AFTER CLEANUP", &after_cleanup);
+        }
+
+        // Check for memory pressure
+        let pressure = MemoryPressure::from_stats(&current_stats);
+        match pressure.pressure_level {
+            PressureLevel::High | PressureLevel::Critical => {
+                println!("\n⚠️  HIGH MEMORY PRESSURE DETECTED!");
+                println!("   Available: {:.1}%", pressure.available_ratio * 100.0);
+                println!("   Stopping to prevent system issues.");
+                break;
+            }
+            PressureLevel::Medium => {
+                println!("\n⚡ Medium memory pressure - continuing with caution");
+                thread::sleep(Duration::from_secs(2));
+            }
+            PressureLevel::Low => {
+                // Continue at normal pace
+            }
+        }
+
+        // Continue immediately to next file creation
+        println!("\n🔄 Continuing to next file...");
     }
 
-    println!();
+    // Final summary
+    let final_stats = MemoryStats::current()?;
+    let final_inactive_gb = final_stats.inactive_file as f64 / (1024.0 * 1024.0);
+    let total_runtime = start_time.elapsed();
+
+    println!("\n{}", "=".repeat(60));
+    println!("🏁 FINAL SUMMARY");
+    println!("{}", "=".repeat(60));
+    println!(
+        "Total runtime: {:.1} minutes",
+        total_runtime.as_secs_f64() / 60.0
+    );
+    println!("Files created: {}", file_counter);
+    println!("Total data written: {} GB", file_counter * file_size_gb);
+    println!("Initial inactive(file): {:.1} GB", initial_inactive_gb);
+    println!("Final inactive(file): {:.1} GB", final_inactive_gb);
+    println!(
+        "🎯 Net inactive memory generated: {:.1} GB",
+        final_inactive_gb - initial_inactive_gb
+    );
+    println!(
+        "Average file creation time: {:.2} seconds",
+        total_runtime.as_secs_f64() / file_counter as f64
+    );
+
+    // Cleanup on exit
+    println!("\n🧹 Cleaning up all test files...");
+    for file_path in created_files {
+        if let Err(e) = std::fs::remove_file(&file_path) {
+            println!("⚠️  Failed to remove {}: {}", file_path, e);
+        }
+    }
+    println!("✅ Cleanup complete!");
+
     Ok(())
 }
 
-fn print_trend(name: &str, trend: &Trend) {
-    println!(
-        "  {}: {} KB → {} KB ({:+} KB, {:.1}%, {:?})",
-        name,
-        format_number(trend.initial_value),
-        format_number(trend.final_value),
-        format_signed_number(trend.change),
-        trend.change_percent,
-        trend.direction
-    );
-}
+fn create_large_file(path: &str, size_gb: usize) -> std::io::Result<()> {
+    let mut file = File::create(path)?;
+    let chunk_size = 64 * 1024 * 1024; // 64MB chunks for better performance
+    let chunk = vec![0u8; chunk_size];
+    let chunks_per_gb = (1024 * 1024 * 1024) / chunk_size;
+    let total_chunks = size_gb * chunks_per_gb;
 
-/// Format a number with comma separators
-fn format_number(n: u64) -> String {
-    let s = n.to_string();
-    let mut result = String::new();
-    let chars: Vec<char> = s.chars().collect();
+    for i in 0..total_chunks {
+        file.write_all(&chunk)?;
 
-    for (i, &ch) in chars.iter().enumerate() {
-        if i > 0 && (chars.len() - i) % 3 == 0 {
-            result.push(',');
+        // Sync every 8 chunks (512MB) to avoid too much dirty memory
+        if i % 8 == 7 {
+            file.sync_data()?;
         }
-        result.push(ch);
     }
 
-    result
+    file.sync_all()?;
+    Ok(())
 }
 
-/// Format a signed number with comma separators
-fn format_signed_number(n: i64) -> String {
-    if n >= 0 {
-        format!("+{}", format_number(n as u64))
-    } else {
-        format!("-{}", format_number((-n) as u64))
-    }
+fn print_memory_stats(label: &str, stats: &MemoryStats) {
+    println!("\n📊 {} - Memory Statistics:", label);
+    println!("  ┌─────────────────────────────────────────────────────────────┐");
+    println!(
+        "  │ Total Memory:      {} │",
+        format!("{:>35}", format_memory_kb(stats.mem_total))
+    );
+    println!(
+        "  │ Free Memory:       {} │",
+        format!("{:>35}", format_memory_kb(stats.mem_free))
+    );
+    println!(
+        "  │ Available Memory:  {} │",
+        format!("{:>35}", format_memory_kb(stats.mem_available))
+    );
+    println!(
+        "  │ Page Cache:        {} │",
+        format!("{:>35}", format_memory_kb(stats.page_cache_size()))
+    );
+    println!("  │ ──────────────────────────────────────────────────────────── │");
+    println!(
+        "  │ 🎯 Inactive(file): {} │",
+        format!("{:>35}", format_memory_kb(stats.inactive_file))
+    );
+    println!(
+        "  │ Active(file):      {} │",
+        format!("{:>35}", format_memory_kb(stats.active_file))
+    );
+    println!("  │ ──────────────────────────────────────────────────────────── │");
+    println!(
+        "  │ Dirty Pages:       {} │",
+        format!("{:>35}", format_memory_kb(stats.dirty))
+    );
+    println!(
+        "  │ Writeback:         {} │",
+        format!("{:>35}", format_memory_kb(stats.writeback))
+    );
+    println!("  └─────────────────────────────────────────────────────────────┘");
+
+    // Calculate and show key ratios
+    let inactive_ratio = stats.inactive_file as f64 / stats.mem_total as f64 * 100.0;
+    let cache_ratio = stats.page_cache_size() as f64 / stats.mem_total as f64 * 100.0;
+    let available_ratio = stats.mem_available as f64 / stats.mem_total as f64 * 100.0;
+
+    println!("  📈 Key Ratios:");
+    println!(
+        "     Inactive(file): {:.1}% of total memory",
+        inactive_ratio
+    );
+    println!("     Page Cache:     {:.1}% of total memory", cache_ratio);
+    println!(
+        "     Available:      {:.1}% of total memory",
+        available_ratio
+    );
 }
 
 #[cfg(test)]
