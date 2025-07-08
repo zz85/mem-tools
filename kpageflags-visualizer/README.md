@@ -14,6 +14,7 @@ A Rust program to visualize Linux kernel page flags from `/proc/kpageflags`.
 - Verbose mode with detailed flag descriptions
 - **Progress indication for large datasets**
 - **Output limiting for manageable display**
+- **Interactive TUI mode with mouse support**
 
 ## Requirements
 
@@ -48,7 +49,52 @@ cargo run -- --summary
 
 # Show enhanced grid visualization with flag categories
 cargo run -- --grid --width 60
+
+# Launch interactive TUI mode with mouse support
+cargo run -- --tui
 ```
+
+### Interactive TUI Mode
+
+The TUI mode provides a real-time, interactive visualization with mouse support:
+
+```bash
+# Launch TUI mode
+cargo run -- --tui
+sudo ./target/debug/kpageflags-visualizer --tui
+```
+
+#### TUI Controls
+
+**Mouse Controls:**
+- **Click and drag**: Select an area to zoom into
+- **Scroll wheel up**: Zoom in
+- **Scroll wheel down**: Zoom out
+- **ESC**: Cancel current selection
+
+**Keyboard Controls:**
+- **Arrow keys**: Navigate around the grid
+- **+/=**: Zoom in
+- **-**: Zoom out
+- **Home**: Reset view to origin
+- **h**: Toggle help screen
+- **s**: Toggle statistics panel
+- **r**: Refresh data
+- **q**: Quit
+
+**Filter Controls:**
+- **1-8**: Filter by flag category (State, Memory, Usage, Allocation, I/O, Structure, Special, Error)
+- **0**: Clear filter (show all)
+
+#### TUI Features
+
+- **Real-time grid visualization** with color-coded page flags
+- **Mouse-driven zoom selection** - click and drag to select areas for detailed examination
+- **Progressive data loading** with progress indication
+- **Category-based filtering** to focus on specific flag types
+- **Live statistics** showing flag distribution
+- **Responsive grid** that adapts to terminal size and zoom level
+- **Visual selection feedback** with highlighted cells during drag operations
 
 ### Command line options
 
@@ -60,6 +106,7 @@ cargo run -- --grid --width 60
 - `-w, --width <WIDTH>`: Grid width for visualization (default: 80)
 - `-l, --limit <LIMIT>`: Limit individual page output for large datasets (default: 1000)
 - `--histogram`: Show histogram visualization in summary
+- `--tui`: Launch interactive TUI mode with mouse support
 
 ### Examples
 
@@ -81,6 +128,9 @@ cargo run -- --summary --histogram
 
 # Combine histogram with grid for comprehensive visualization
 cargo run -- --summary --histogram --grid
+
+# Launch interactive TUI for real-time exploration
+cargo run -- --tui
 ```
 
 ## Enhanced Visualization
@@ -187,6 +237,7 @@ You may need to run with elevated privileges:
 
 ```bash
 sudo cargo run -- --summary --grid
+sudo cargo run -- --tui
 ```
 
 ## Performance Notes
@@ -195,6 +246,7 @@ sudo cargo run -- --summary --grid
 - **Progress indication**: Shows progress for datasets larger than 10,000 pages
 - **Memory efficient**: Processes pages in chunks to handle large memory systems
 - Use `--summary` flag for fastest analysis of large datasets
+- **TUI mode**: Optimized for real-time interaction with progressive loading
 
 ## Notes
 
@@ -203,3 +255,4 @@ sudo cargo run -- --summary --grid
 - Not all PFNs may have corresponding entries in kpageflags
 - The program handles missing entries gracefully
 - **Default behavior now analyzes ALL available pages** for comprehensive system overview
+- **TUI mode provides interactive exploration** with mouse-driven zoom and navigation

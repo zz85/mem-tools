@@ -1,6 +1,9 @@
-use crate::{KPageFlagsReader, PageInfo, FlagCategory, PAGE_FLAGS, get_category_symbol_and_color};
+use crate::{get_category_symbol_and_color, FlagCategory, KPageFlagsReader, PageInfo, PAGE_FLAGS};
 use crossterm::{
-    event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind},
+    event::{
+        self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind, MouseButton,
+        MouseEvent, MouseEventKind,
+    },
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
@@ -9,9 +12,7 @@ use ratatui::{
     layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span, Text},
-    widgets::{
-        Block, Borders, Gauge, Paragraph, Wrap,
-    },
+    widgets::{Block, Borders, Gauge, Paragraph, Wrap},
     Frame, Terminal,
 };
 use std::collections::HashMap;
@@ -37,6 +38,11 @@ pub struct AppState {
     pub total_pages_scanned: usize,
     pub scanning: bool,
     pub scan_progress: f64,
+    // Mouse selection state
+    pub mouse_selecting: bool,
+    pub selection_start: Option<(u16, u16)>,
+    pub selection_end: Option<(u16, u16)>,
+    pub grid_area: Option<Rect>,
 }
 
 impl Default for AppState {
@@ -56,6 +62,10 @@ impl Default for AppState {
             total_pages_scanned: 0,
             scanning: false,
             scan_progress: 0.0,
+            mouse_selecting: false,
+            selection_start: None,
+            selection_end: None,
+            grid_area: None,
         }
     }
 }
@@ -70,7 +80,7 @@ impl TuiApp {
     pub fn new() -> Result<Self, Box<dyn std::error::Error>> {
         let reader = KPageFlagsReader::new()?;
         let interrupt_flag = Arc::new(AtomicBool::new(false));
-        
+
         Ok(Self {
             state: AppState::default(),
             reader,
@@ -78,7 +88,10 @@ impl TuiApp {
         })
     }
 
-    pub async fn run<B: Backend>(&mut self, terminal: &mut Terminal<B>) -> Result<(), Box<dyn std::error::Error>> {
+    pub async fn run<B: Backend>(
+        &mut self,
+        terminal: &mut Terminal<B>,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         // Start background scanning
         self.start_background_scan().await?;
 
@@ -86,32 +99,45 @@ impl TuiApp {
             terminal.draw(|f| self.ui(f))?;
 
             if event::poll(Duration::from_millis(100))? {
-                if let Event::Key(key) = event::read()? {
-                    if key.kind == KeyEventKind::Press {
-                        match key.code {
-                            KeyCode::Char('q') => break,
-                            KeyCode::Char('h') => self.state.show_help = !self.state.show_help,
-                            KeyCode::Char('s') => self.state.show_stats = !self.state.show_stats,
-                            KeyCode::Char('r') => self.refresh_data().await?,
-                            KeyCode::Char('+') | KeyCode::Char('=') => self.zoom_in(),
-                            KeyCode::Char('-') => self.zoom_out(),
-                            KeyCode::Up => self.move_up(),
-                            KeyCode::Down => self.move_down(),
-                            KeyCode::Left => self.move_left(),
-                            KeyCode::Right => self.move_right(),
-                            KeyCode::Char('1') => self.set_filter(Some(FlagCategory::State)),
-                            KeyCode::Char('2') => self.set_filter(Some(FlagCategory::Memory)),
-                            KeyCode::Char('3') => self.set_filter(Some(FlagCategory::Usage)),
-                            KeyCode::Char('4') => self.set_filter(Some(FlagCategory::Allocation)),
-                            KeyCode::Char('5') => self.set_filter(Some(FlagCategory::IO)),
-                            KeyCode::Char('6') => self.set_filter(Some(FlagCategory::Structure)),
-                            KeyCode::Char('7') => self.set_filter(Some(FlagCategory::Special)),
-                            KeyCode::Char('8') => self.set_filter(Some(FlagCategory::Error)),
-                            KeyCode::Char('0') => self.set_filter(None),
-                            KeyCode::Home => self.reset_view(),
-                            _ => {}
+                match event::read()? {
+                    Event::Key(key) => {
+                        if key.kind == KeyEventKind::Press {
+                            match key.code {
+                                KeyCode::Char('q') => break,
+                                KeyCode::Char('h') => self.state.show_help = !self.state.show_help,
+                                KeyCode::Char('s') => {
+                                    self.state.show_stats = !self.state.show_stats
+                                }
+                                KeyCode::Char('r') => self.refresh_data().await?,
+                                KeyCode::Char('+') | KeyCode::Char('=') => self.zoom_in(),
+                                KeyCode::Char('-') => self.zoom_out(),
+                                KeyCode::Up => self.move_up(),
+                                KeyCode::Down => self.move_down(),
+                                KeyCode::Left => self.move_left(),
+                                KeyCode::Right => self.move_right(),
+                                KeyCode::Char('1') => self.set_filter(Some(FlagCategory::State)),
+                                KeyCode::Char('2') => self.set_filter(Some(FlagCategory::Memory)),
+                                KeyCode::Char('3') => self.set_filter(Some(FlagCategory::Usage)),
+                                KeyCode::Char('4') => {
+                                    self.set_filter(Some(FlagCategory::Allocation))
+                                }
+                                KeyCode::Char('5') => self.set_filter(Some(FlagCategory::IO)),
+                                KeyCode::Char('6') => {
+                                    self.set_filter(Some(FlagCategory::Structure))
+                                }
+                                KeyCode::Char('7') => self.set_filter(Some(FlagCategory::Special)),
+                                KeyCode::Char('8') => self.set_filter(Some(FlagCategory::Error)),
+                                KeyCode::Char('0') => self.set_filter(None),
+                                KeyCode::Home => self.reset_view(),
+                                KeyCode::Esc => self.cancel_selection(),
+                                _ => {}
+                            }
                         }
                     }
+                    Event::Mouse(mouse) => {
+                        self.handle_mouse_event(mouse);
+                    }
+                    _ => {}
                 }
             }
 
@@ -129,13 +155,15 @@ impl TuiApp {
     async fn start_background_scan(&mut self) -> Result<(), Box<dyn std::error::Error>> {
         self.state.scanning = true;
         self.state.scan_progress = 0.0;
-        
+
         // Start with a small sample for immediate feedback
-        let initial_pages = self.reader.read_range(0, 10000, self.interrupt_flag.clone())?;
+        let initial_pages = self
+            .reader
+            .read_range(0, 10000, self.interrupt_flag.clone())?;
         self.state.pages = initial_pages;
         self.state.total_pages_scanned = self.state.pages.len();
         self.state.scan_progress = 0.01; // Start at 1%
-        
+
         Ok(())
     }
 
@@ -143,13 +171,13 @@ impl TuiApp {
         // Simulate progressive scanning
         if self.state.scan_progress < 1.0 {
             self.state.scan_progress += 0.01;
-            
+
             // Load more pages as we progress
             if self.state.scan_progress > 0.5 && self.state.pages.len() < 50000 {
                 let more_pages = self.reader.read_range(
-                    self.state.pages.len() as u64, 
-                    10000, 
-                    self.interrupt_flag.clone()
+                    self.state.pages.len() as u64,
+                    10000,
+                    self.interrupt_flag.clone(),
                 )?;
                 self.state.pages.extend(more_pages);
                 self.state.total_pages_scanned = self.state.pages.len();
@@ -157,22 +185,24 @@ impl TuiApp {
         } else {
             self.state.scanning = false;
         }
-        
+
         Ok(())
     }
 
     async fn refresh_data(&mut self) -> Result<(), Box<dyn std::error::Error>> {
         self.state.scanning = true;
         self.state.scan_progress = 0.0;
-        
+
         // Reload data
-        let pages = self.reader.read_range(0, 100000, self.interrupt_flag.clone())?;
+        let pages = self
+            .reader
+            .read_range(0, 100000, self.interrupt_flag.clone())?;
         self.state.pages = pages;
         self.state.total_pages_scanned = self.state.pages.len();
         self.state.last_update = Instant::now();
         self.state.scanning = false;
         self.state.scan_progress = 1.0;
-        
+
         Ok(())
     }
 
@@ -210,7 +240,100 @@ impl TuiApp {
         self.state.offset_y = 0;
     }
 
-    fn ui(&self, f: &mut Frame) {
+    fn cancel_selection(&mut self) {
+        self.state.mouse_selecting = false;
+        self.state.selection_start = None;
+        self.state.selection_end = None;
+    }
+
+    fn handle_mouse_event(&mut self, mouse: MouseEvent) {
+        if let Some(grid_area) = self.state.grid_area {
+            // Check if mouse is within grid area
+            if mouse.column >= grid_area.x
+                && mouse.column < grid_area.x + grid_area.width
+                && mouse.row >= grid_area.y
+                && mouse.row < grid_area.y + grid_area.height
+            {
+                match mouse.kind {
+                    MouseEventKind::Down(MouseButton::Left) => {
+                        self.state.mouse_selecting = true;
+                        self.state.selection_start = Some((mouse.column, mouse.row));
+                        self.state.selection_end = Some((mouse.column, mouse.row));
+                    }
+                    MouseEventKind::Drag(MouseButton::Left) => {
+                        if self.state.mouse_selecting {
+                            self.state.selection_end = Some((mouse.column, mouse.row));
+                        }
+                    }
+                    MouseEventKind::Up(MouseButton::Left) => {
+                        if self.state.mouse_selecting {
+                            self.state.selection_end = Some((mouse.column, mouse.row));
+                            self.zoom_to_selection();
+                            self.cancel_selection();
+                        }
+                    }
+                    MouseEventKind::ScrollUp => {
+                        self.zoom_in();
+                    }
+                    MouseEventKind::ScrollDown => {
+                        self.zoom_out();
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    fn zoom_to_selection(&mut self) {
+        if let (Some(start), Some(end), Some(grid_area)) = (
+            self.state.selection_start,
+            self.state.selection_end,
+            self.state.grid_area,
+        ) {
+            // Calculate selection bounds relative to grid
+            let grid_start_x = start.0.saturating_sub(grid_area.x);
+            let grid_start_y = start.1.saturating_sub(grid_area.y);
+            let grid_end_x = end.0.saturating_sub(grid_area.x);
+            let grid_end_y = end.1.saturating_sub(grid_area.y);
+
+            let min_x = grid_start_x.min(grid_end_x) as i64;
+            let max_x = grid_start_x.max(grid_end_x) as i64;
+            let min_y = grid_start_y.min(grid_end_y) as i64;
+            let max_y = grid_start_y.max(grid_end_y) as i64;
+
+            // Calculate selection dimensions
+            let selection_width = (max_x - min_x + 1) as f64;
+            let selection_height = (max_y - min_y + 1) as f64;
+
+            if selection_width > 1.0 && selection_height > 1.0 {
+                // Calculate zoom factor to fit selection to screen
+                let zoom_x = grid_area.width as f64 / selection_width;
+                let zoom_y = grid_area.height as f64 / selection_height;
+                let new_zoom = zoom_x.min(zoom_y).min(10.0).max(0.1);
+
+                // Update zoom and center on selection
+                self.state.zoom_level = new_zoom;
+
+                // Convert grid coordinates to page coordinates
+                let pages_per_row =
+                    ((grid_area.width as f64 * self.state.zoom_level) as usize).max(1);
+                let center_x = (min_x + max_x) / 2;
+                let center_y = (min_y + max_y) / 2;
+
+                // Adjust offset to center the selection
+                self.state.offset_x =
+                    (center_x as f64 / self.state.zoom_level) as i64 - (grid_area.width as i64 / 2);
+                self.state.offset_y = (center_y as f64 / self.state.zoom_level) as i64
+                    - (grid_area.height as i64 / 2);
+
+                // Ensure offsets don't go negative
+                self.state.offset_x = self.state.offset_x.max(0);
+                self.state.offset_y = self.state.offset_y.max(0);
+            }
+        }
+    }
+
+    fn ui(&mut self, f: &mut Frame) {
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
@@ -236,7 +359,7 @@ impl TuiApp {
                 .split(chunks[1]);
 
             self.render_grid(f, main_chunks[0]);
-            
+
             if self.state.show_stats {
                 self.render_stats(f, main_chunks[1]);
             }
@@ -256,8 +379,7 @@ impl TuiApp {
         } else {
             format!(
                 "KPageFlags TUI - {} pages loaded - Zoom: {:.1}x",
-                self.state.total_pages_scanned,
-                self.state.zoom_level
+                self.state.total_pages_scanned, self.state.zoom_level
             )
         };
 
@@ -286,13 +408,16 @@ impl TuiApp {
         }
     }
 
-    fn render_grid(&self, f: &mut Frame, area: Rect) {
+    fn render_grid(&mut self, f: &mut Frame, area: Rect) {
         let block = Block::default()
-            .title("Memory Page Grid")
+            .title("Memory Page Grid (Click and drag to zoom)")
             .borders(Borders::ALL);
 
         let inner = block.inner(area);
         f.render_widget(block, area);
+
+        // Store grid area for mouse handling
+        self.state.grid_area = Some(inner);
 
         // Calculate grid dimensions based on zoom and area
         let grid_width = ((inner.width as f64 * self.state.zoom_level) as usize).max(1);
@@ -301,48 +426,117 @@ impl TuiApp {
         // Create grid content
         let mut lines = Vec::new();
         let pages_per_row = grid_width;
-        
+
         let filtered_pages: Vec<&PageInfo> = if let Some(filter_cat) = self.state.filter_category {
-            self.state.pages.iter()
-                .filter(|page| {
-                    page.get_flag_categories().contains(&filter_cat)
-                })
+            self.state
+                .pages
+                .iter()
+                .filter(|page| page.get_flag_categories().contains(&filter_cat))
                 .collect()
         } else {
             self.state.pages.iter().collect()
         };
 
         let start_idx = (self.state.offset_y * pages_per_row as i64 + self.state.offset_x) as usize;
-        
+
         for row in 0..grid_height.min(inner.height as usize) {
             let mut spans = Vec::new();
-            
+
             for col in 0..pages_per_row.min(inner.width as usize) {
                 let page_idx = start_idx + row * pages_per_row + col;
-                
-                if page_idx < filtered_pages.len() {
+
+                let (symbol, mut color) = if page_idx < filtered_pages.len() {
                     let page = filtered_pages[page_idx];
-                    let (symbol, color) = self.get_page_symbol_and_color(page);
-                    spans.push(Span::styled(symbol.to_string(), Style::default().fg(color)));
+                    self.get_page_symbol_and_color(page)
                 } else {
-                    spans.push(Span::styled(".", Style::default().fg(Color::DarkGray)));
+                    ('.', Color::DarkGray)
+                };
+
+                // Check if this cell is in the selection
+                if self.is_cell_in_selection(inner, col as u16, row as u16) {
+                    // Highlight selected cells with inverted colors
+                    color = Color::Black;
+                    spans.push(Span::styled(
+                        symbol.to_string(),
+                        Style::default().fg(color).bg(Color::White),
+                    ));
+                } else {
+                    spans.push(Span::styled(symbol.to_string(), Style::default().fg(color)));
                 }
             }
-            
+
             lines.push(Line::from(spans));
         }
 
         let grid_text = Text::from(lines);
-        let grid_paragraph = Paragraph::new(grid_text)
-            .wrap(Wrap { trim: false });
+        let grid_paragraph = Paragraph::new(grid_text).wrap(Wrap { trim: false });
 
         f.render_widget(grid_paragraph, inner);
+
+        // Render selection overlay if selecting
+        if self.state.mouse_selecting {
+            self.render_selection_overlay(f, inner);
+        }
+    }
+
+    fn is_cell_in_selection(&self, grid_area: Rect, col: u16, row: u16) -> bool {
+        if let (Some(start), Some(end)) = (self.state.selection_start, self.state.selection_end) {
+            let grid_start_x = start.0.saturating_sub(grid_area.x);
+            let grid_start_y = start.1.saturating_sub(grid_area.y);
+            let grid_end_x = end.0.saturating_sub(grid_area.x);
+            let grid_end_y = end.1.saturating_sub(grid_area.y);
+
+            let min_x = grid_start_x.min(grid_end_x);
+            let max_x = grid_start_x.max(grid_end_x);
+            let min_y = grid_start_y.min(grid_end_y);
+            let max_y = grid_start_y.max(grid_end_y);
+
+            col >= min_x && col <= max_x && row >= min_y && row <= max_y
+        } else {
+            false
+        }
+    }
+
+    fn render_selection_overlay(&self, f: &mut Frame, grid_area: Rect) {
+        if let (Some(start), Some(end)) = (self.state.selection_start, self.state.selection_end) {
+            let grid_start_x = start.0.saturating_sub(grid_area.x);
+            let grid_start_y = start.1.saturating_sub(grid_area.y);
+            let grid_end_x = end.0.saturating_sub(grid_area.x);
+            let grid_end_y = end.1.saturating_sub(grid_area.y);
+
+            let min_x = grid_start_x.min(grid_end_x);
+            let max_x = grid_start_x.max(grid_end_x);
+            let min_y = grid_start_y.min(grid_end_y);
+            let max_y = grid_start_y.max(grid_end_y);
+
+            // Create selection info text
+            let selection_info = format!(
+                "Selection: {}x{} ({}x{} to {}x{})",
+                max_x - min_x + 1,
+                max_y - min_y + 1,
+                min_x,
+                min_y,
+                max_x,
+                max_y
+            );
+
+            // Show selection info at the bottom of the grid
+            let info_area = Rect {
+                x: grid_area.x,
+                y: grid_area.y + grid_area.height.saturating_sub(1),
+                width: grid_area.width,
+                height: 1,
+            };
+
+            let info_paragraph = Paragraph::new(selection_info)
+                .style(Style::default().fg(Color::Yellow).bg(Color::Blue));
+
+            f.render_widget(info_paragraph, info_area);
+        }
     }
 
     fn render_stats(&self, f: &mut Frame, area: Rect) {
-        let block = Block::default()
-            .title("Statistics")
-            .borders(Borders::ALL);
+        let block = Block::default().title("Statistics").borders(Borders::ALL);
 
         let inner = block.inner(area);
         f.render_widget(block, area);
@@ -357,7 +551,7 @@ impl TuiApp {
             total_pages += 1;
             if page.flags != 0 {
                 pages_with_flags += 1;
-                
+
                 // Count individual flags
                 for (flag, name, _, category) in PAGE_FLAGS {
                     if page.flags & flag != 0 {
@@ -376,10 +570,18 @@ impl TuiApp {
             ]),
             Line::from(vec![
                 Span::styled("With Flags: ", Style::default().fg(Color::Green)),
-                Span::styled(pages_with_flags.to_string(), Style::default().fg(Color::White)),
+                Span::styled(
+                    pages_with_flags.to_string(),
+                    Style::default().fg(Color::White),
+                ),
             ]),
             Line::from(""),
-            Line::from(Span::styled("Top Flags:", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))),
+            Line::from(Span::styled(
+                "Top Flags:",
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            )),
         ];
 
         // Add top flags
@@ -395,12 +597,20 @@ impl TuiApp {
 
             stats_lines.push(Line::from(vec![
                 Span::styled(format!("{}: ", flag), Style::default().fg(Color::Green)),
-                Span::styled(format!("{} ({:.1}%)", count, percentage), Style::default().fg(Color::White)),
+                Span::styled(
+                    format!("{} ({:.1}%)", count, percentage),
+                    Style::default().fg(Color::White),
+                ),
             ]));
         }
 
         stats_lines.push(Line::from(""));
-        stats_lines.push(Line::from(Span::styled("Categories:", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))));
+        stats_lines.push(Line::from(Span::styled(
+            "Categories:",
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        )));
 
         // Add category stats
         let mut sorted_categories: Vec<_> = category_counts.iter().collect();
@@ -415,28 +625,47 @@ impl TuiApp {
 
             let (symbol, color) = get_category_symbol_and_color(**category);
             stats_lines.push(Line::from(vec![
-                Span::styled(format!("{} ", symbol), Style::default().fg(self.ratatui_color_from_colored(color))),
-                Span::styled(format!("{:?}: ", category), Style::default().fg(Color::Yellow)),
-                Span::styled(format!("{} ({:.1}%)", count, percentage), Style::default().fg(Color::White)),
+                Span::styled(
+                    format!("{} ", symbol),
+                    Style::default().fg(self.ratatui_color_from_colored(color)),
+                ),
+                Span::styled(
+                    format!("{:?}: ", category),
+                    Style::default().fg(Color::Yellow),
+                ),
+                Span::styled(
+                    format!("{} ({:.1}%)", count, percentage),
+                    Style::default().fg(Color::White),
+                ),
             ]));
         }
 
         let stats_text = Text::from(stats_lines);
-        let stats_paragraph = Paragraph::new(stats_text)
-            .wrap(Wrap { trim: false });
+        let stats_paragraph = Paragraph::new(stats_text).wrap(Wrap { trim: false });
 
         f.render_widget(stats_paragraph, inner);
     }
 
     fn render_help(&self, f: &mut Frame, area: Rect) {
         let help_text = vec![
-            Line::from(Span::styled("KPageFlags TUI Help", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))),
+            Line::from(Span::styled(
+                "KPageFlags TUI Help",
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            )),
             Line::from(""),
             Line::from("Navigation:"),
             Line::from("  Arrow Keys    - Move around the grid"),
             Line::from("  +/=           - Zoom in"),
             Line::from("  -             - Zoom out"),
             Line::from("  Home          - Reset view to origin"),
+            Line::from(""),
+            Line::from("Mouse Controls:"),
+            Line::from("  Click & Drag  - Select area to zoom into"),
+            Line::from("  Scroll Up     - Zoom in"),
+            Line::from("  Scroll Down   - Zoom out"),
+            Line::from("  Esc           - Cancel selection"),
             Line::from(""),
             Line::from("Controls:"),
             Line::from("  h             - Toggle this help"),
@@ -475,9 +704,19 @@ impl TuiApp {
             "Filter: None".to_string()
         };
 
+        let selection_text = if self.state.mouse_selecting {
+            " | Selecting..."
+        } else {
+            ""
+        };
+
         let footer_text = format!(
-            "Press 'h' for help | 'q' to quit | {} | Offset: ({}, {})",
-            filter_text, self.state.offset_x, self.state.offset_y
+            "Press 'h' for help | 'q' to quit | {} | Offset: ({}, {}) | Zoom: {:.1}x{}",
+            filter_text,
+            self.state.offset_x,
+            self.state.offset_y,
+            self.state.zoom_level,
+            selection_text
         );
 
         let footer = Paragraph::new(footer_text)
