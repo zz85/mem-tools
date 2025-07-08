@@ -29,9 +29,9 @@ fn main() -> Result<()> {
     // Create a page cache monitor
     let mut monitor = PageCacheMonitor::new()?;
 
-    // Write a 50MB file and observe memory impact
-    println!("\nWriting 50MB file...");
-    let file_data = vec![42u8; 50 * 1024 * 1024]; // 50MB of data
+    // Write a 1GB file and observe memory impact
+    println!("\nWriting 1GB file...");
+    let file_data = vec![42u8; 1024 * 1024 * 1024]; // 1GB of data
 
     let analysis = monitor.analyze_file_operation(|| {
         let mut file = File::create("/tmp/demo_file.dat")?;

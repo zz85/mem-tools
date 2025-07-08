@@ -25,7 +25,7 @@ fn main() -> Result<()> {
     let file_paths = ["/tmp/big1.dat", "/tmp/big2.dat", "/tmp/big3.dat"];
 
     for (i, path) in file_paths.iter().enumerate() {
-        let size_mb = (i + 1) * 20; // 20MB, 40MB, 60MB
+        let size_mb = (i + 1) * 200; // 200MB, 400MB, 600MB
         let data = vec![i as u8; size_mb * 1024 * 1024];
 
         if let Ok(mut file) = File::create(path) {

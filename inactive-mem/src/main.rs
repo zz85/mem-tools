@@ -92,12 +92,12 @@ fn demonstrate_file_io_impact() -> Result<()> {
     let mut monitor = PageCacheMonitor::new()?;
     let test_file = "/tmp/memory_test_file.dat";
 
-    // Create a test file (10MB)
-    println!("Creating 10MB test file...");
+    // Create a test file (1GB)
+    println!("Creating 1GB test file...");
     let analysis = FileOperations::write_file_and_analyze(
         &mut monitor,
         test_file,
-        &vec![0u8; 10 * 1024 * 1024],
+        &vec![0u8; 1024 * 1024 * 1024],
     )?;
 
     println!("Write operation impact: {}", analysis.summary());
@@ -156,7 +156,7 @@ fn demonstrate_continuous_monitoring() -> Result<()> {
         thread::sleep(Duration::from_secs(1));
 
         // Create files of different sizes
-        let size = (i + 1) * 2 * 1024 * 1024; // 2MB, 4MB, 6MB
+        let size = (i + 1) * 100 * 1024 * 1024; // 100MB, 200MB, 300MB
         let data = vec![i as u8; size];
 
         if let Ok(mut file) = File::create(file_path) {
