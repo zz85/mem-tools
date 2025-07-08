@@ -392,6 +392,267 @@ impl KPageFlagsReader {
 
         Ok(pages)
     }
+
+    /// Optimized summary-only scan that minimizes allocations
+    /// Only stores counters, not individual PageInfo objects
+    pub fn scan_for_summary_only(
+        &mut self,
+        start_pfn: u64,
+        count: Option<u64>,
+        interrupt_flag: Arc<AtomicBool>,
+        show_histogram: bool,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        // Pre-allocate fixed-size arrays for counters to avoid HashMap allocations
+        const MAX_FLAGS: usize = PAGE_FLAGS.len();
+        let mut flag_counts = [0u32; MAX_FLAGS];
+        let mut category_counts = [0u32; 8]; // 8 categories in FlagCategory enum
+
+        let mut total_pages = 0u32;
+        let mut pages_with_flags = 0u32;
+        let mut pfn = start_pfn;
+        let mut consecutive_failures = 0u32;
+        const MAX_CONSECUTIVE_FAILURES: u32 = 1000;
+
+        let estimated_total = if count.is_none() {
+            get_estimated_total_pages().unwrap_or(1048576)
+        } else {
+            count.unwrap()
+        };
+
+        println!(
+            "Scanning pages for summary (optimized mode) starting from PFN 0x{:x}...",
+            start_pfn
+        );
+
+        if count.is_none() {
+            println!(
+                "Estimated total pages in system: ~{}",
+                estimated_total.to_string().cyan()
+            );
+            println!(
+                "{}",
+                "Press Ctrl-C to stop and show summary of pages scanned so far".yellow()
+            );
+        }
+
+        let end_pfn = count.map(|c| start_pfn + c).unwrap_or(u64::MAX);
+
+        loop {
+            if pfn >= end_pfn {
+                break;
+            }
+
+            // Check for interrupt signal every 1000 pages
+            if total_pages % 1000 == 0 && interrupt_flag.load(Ordering::Relaxed) {
+                println!(
+                    "\n{}",
+                    "Interrupt received! Stopping scan and showing summary..."
+                        .yellow()
+                        .bold()
+                );
+                break;
+            }
+
+            match self.read_page_flags(pfn) {
+                Ok(Some(flags)) => {
+                    total_pages += 1;
+                    consecutive_failures = 0;
+
+                    if flags != 0 {
+                        pages_with_flags += 1;
+
+                        // Count individual flags using array indexing (faster than HashMap)
+                        for (i, (flag, _, _, category)) in PAGE_FLAGS.iter().enumerate() {
+                            if flags & flag != 0 {
+                                flag_counts[i] += 1;
+                                category_counts[*category as usize] += 1;
+                            }
+                        }
+                    }
+
+                    // Show progress every 50,000 pages
+                    if total_pages % 50000 == 0 {
+                        let progress = if estimated_total > 0 {
+                            format!(
+                                " ({:.1}%)",
+                                (total_pages as f64 / estimated_total as f64) * 100.0
+                            )
+                        } else {
+                            String::new()
+                        };
+                        println!(
+                            "Scanned {} pages so far{}",
+                            total_pages.to_string().green(),
+                            progress.yellow()
+                        );
+                    }
+                }
+                Ok(None) => {
+                    consecutive_failures += 1;
+                    if consecutive_failures > MAX_CONSECUTIVE_FAILURES {
+                        break;
+                    }
+                }
+                Err(_) => {
+                    consecutive_failures += 1;
+                    if consecutive_failures > MAX_CONSECUTIVE_FAILURES {
+                        break;
+                    }
+                }
+            }
+
+            pfn += 1;
+
+            // Safety check: don't read more than 100M pages (400GB of memory)
+            if total_pages > 100_000_000 {
+                println!(
+                    "{}",
+                    "Warning: Reached safety limit of 100M pages. Stopping.".yellow()
+                );
+                break;
+            }
+        }
+
+        let status_msg = if interrupt_flag.load(Ordering::Relaxed) {
+            format!(
+                "Scan interrupted - successfully scanned {} pages",
+                total_pages
+            )
+        } else {
+            format!("Successfully scanned {} total pages", total_pages)
+        };
+
+        println!("{}", status_msg.green().bold());
+
+        // Print optimized summary using arrays instead of HashMaps
+        self.print_optimized_summary(
+            total_pages,
+            pages_with_flags,
+            &flag_counts,
+            &category_counts,
+            show_histogram,
+        );
+
+        Ok(())
+    }
+
+    fn print_optimized_summary(
+        &self,
+        total_pages: u32,
+        pages_with_flags: u32,
+        flag_counts: &[u32],
+        category_counts: &[u32],
+        show_histogram: bool,
+    ) {
+        println!("\n{}", "=== SUMMARY ===".blue().bold());
+        println!("Total pages analyzed: {}", total_pages.to_string().cyan());
+        println!("Pages with flags: {}", pages_with_flags.to_string().green());
+        println!(
+            "Pages without flags: {}",
+            (total_pages - pages_with_flags).to_string().yellow()
+        );
+
+        // Find flags with non-zero counts and sort them
+        let mut flag_data: Vec<(usize, u32)> = flag_counts
+            .iter()
+            .enumerate()
+            .filter(|(_, &count)| count > 0)
+            .map(|(i, &count)| (i, count))
+            .collect();
+
+        if !flag_data.is_empty() {
+            flag_data.sort_by(|a, b| b.1.cmp(&a.1));
+
+            println!("\n{}", "Flag distribution:".blue().bold());
+            for (flag_idx, count) in &flag_data {
+                let flag_name = PAGE_FLAGS[*flag_idx].1;
+                let percentage = (*count as f64 / total_pages as f64) * 100.0;
+                println!(
+                    "  {}: {} ({:.1}%)",
+                    flag_name.green().bold(),
+                    count.to_string().white(),
+                    percentage.to_string().yellow()
+                );
+            }
+
+            // Show histogram if requested
+            if show_histogram {
+                self.print_optimized_histogram(&flag_data, total_pages);
+            }
+        }
+
+        // Print category summary
+        self.print_optimized_category_summary(category_counts, total_pages);
+    }
+
+    fn print_optimized_histogram(&self, flag_data: &[(usize, u32)], total_pages: u32) {
+        println!("\n{}", "=== HISTOGRAM ===".blue().bold());
+
+        let max_count = flag_data.iter().map(|(_, count)| *count).max().unwrap_or(1);
+        let histogram_width = 60;
+
+        // Take top 15 flags to avoid cluttering
+        let top_flags = if flag_data.len() > 15 {
+            &flag_data[..15]
+        } else {
+            flag_data
+        };
+
+        for (flag_idx, count) in top_flags {
+            let flag_name = PAGE_FLAGS[*flag_idx].1;
+            let bar_length = (*count as f64 / max_count as f64 * histogram_width as f64) as usize;
+            let percentage = (*count as f64 / total_pages as f64) * 100.0;
+
+            let bar = "█".repeat(bar_length);
+            println!(
+                "{:>12}: {} {} ({:.1}%)",
+                flag_name.green().bold(),
+                bar.blue(),
+                count.to_string().white(),
+                percentage.to_string().yellow()
+            );
+        }
+    }
+
+    fn print_optimized_category_summary(&self, category_counts: &[u32], total_pages: u32) {
+        // Create category data for non-zero counts
+        let mut category_data: Vec<(FlagCategory, u32)> = Vec::new();
+
+        for (i, &count) in category_counts.iter().enumerate() {
+            if count > 0 {
+                // Convert index back to FlagCategory enum
+                let category = match i {
+                    0 => FlagCategory::State,
+                    1 => FlagCategory::Memory,
+                    2 => FlagCategory::Usage,
+                    3 => FlagCategory::Allocation,
+                    4 => FlagCategory::IO,
+                    5 => FlagCategory::Structure,
+                    6 => FlagCategory::Special,
+                    7 => FlagCategory::Error,
+                    _ => continue,
+                };
+                category_data.push((category, count));
+            }
+        }
+
+        if !category_data.is_empty() {
+            category_data.sort_by(|a, b| b.1.cmp(&a.1));
+
+            println!("\n{}", "Flag categories:".blue().bold());
+            for (category, count) in category_data {
+                let (symbol_char, color) = get_category_symbol_and_color(category);
+                let percentage = (count as f64 / total_pages as f64) * 100.0;
+                println!(
+                    "  {} {:?}: {} ({:.1}%)",
+                    symbol_char.to_string().color(color).bold(),
+                    category,
+                    count.to_string().white(),
+                    percentage.to_string().yellow()
+                );
+            }
+        }
+    }
 }
 
 fn print_page_info(page: &PageInfo, verbose: bool) {
@@ -825,6 +1086,43 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("{}", "KPageFlags Visualizer".blue().bold());
 
     let mut reader = KPageFlagsReader::new()?;
+
+    // Use optimized summary-only scanning if --summary flag is set
+    if summary_only {
+        println!(
+            "{}",
+            "Using optimized summary mode (minimal memory usage)".green()
+        );
+
+        if count == u64::MAX {
+            println!(
+                "Analyzing ALL available pages starting from PFN 0x{:x} (summary only)",
+                start_pfn
+            );
+            println!("{}", "=".repeat(50).blue());
+            reader.scan_for_summary_only(
+                start_pfn,
+                None,
+                interrupt_flag.clone(),
+                show_histogram,
+            )?;
+        } else {
+            println!(
+                "Analyzing {} pages starting from PFN 0x{:x} (summary only)",
+                count, start_pfn
+            );
+            println!("{}", "=".repeat(50).blue());
+            reader.scan_for_summary_only(
+                start_pfn,
+                Some(count),
+                interrupt_flag.clone(),
+                show_histogram,
+            )?;
+        }
+
+        // Early return - no need to process individual pages
+        return Ok(());
+    }
 
     let pages = if count == u64::MAX {
         println!(
