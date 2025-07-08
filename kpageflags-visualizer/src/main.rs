@@ -2,6 +2,7 @@ use byteorder::{LittleEndian, ReadBytesExt};
 use clap::{Arg, Command};
 use colored::*;
 use memmap2::MmapOptions;
+use rand::Rng;
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::{BufRead, BufReader, Seek, SeekFrom};
@@ -653,6 +654,371 @@ impl KPageFlagsReader {
             }
         }
     }
+
+    /// Sampling mode for fast statistical overview
+    /// Randomly samples pages across the entire memory space for quick analysis
+    pub fn scan_sampled_summary(
+        &mut self,
+        sample_size: u32,
+        interrupt_flag: Arc<AtomicBool>,
+        show_histogram: bool,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        // Pre-allocate fixed-size arrays for counters
+        const MAX_FLAGS: usize = PAGE_FLAGS.len();
+        let mut flag_counts = [0u32; MAX_FLAGS];
+        let mut category_counts = [0u32; 8]; // 8 categories in FlagCategory enum
+
+        let mut pages_with_flags = 0u32;
+        let mut successful_reads = 0u32;
+
+        // Estimate the maximum PFN by trying to determine system memory size
+        let estimated_max_pfn = self.estimate_max_pfn()?;
+
+        println!(
+            "Sampling {} pages from estimated {} total pages for fast statistical overview...",
+            sample_size.to_string().cyan(),
+            estimated_max_pfn.to_string().yellow()
+        );
+        println!(
+            "Estimated coverage: {:.3}% of total memory",
+            (sample_size as f64 / estimated_max_pfn as f64 * 100.0)
+                .to_string()
+                .green()
+        );
+        println!(
+            "{}",
+            "Press Ctrl-C to stop and show summary of samples collected so far".yellow()
+        );
+
+        let mut rng = rand::thread_rng();
+        let mut attempts = 0u32;
+        let max_attempts: u32 = sample_size * 10; // Allow up to 10x attempts to handle sparse regions
+
+        while successful_reads < sample_size && attempts < max_attempts {
+            // Check for interrupt signal every 100 attempts
+            if attempts % 100 == 0 && interrupt_flag.load(Ordering::Relaxed) {
+                println!(
+                    "\n{}",
+                    "Interrupt received! Stopping sampling and showing summary..."
+                        .yellow()
+                        .bold()
+                );
+                break;
+            }
+
+            // Generate random PFN within estimated range
+            let random_pfn = rng.gen_range(0..estimated_max_pfn);
+            attempts += 1;
+
+            match self.read_page_flags(random_pfn) {
+                Ok(Some(flags)) => {
+                    successful_reads += 1;
+
+                    if flags != 0 {
+                        pages_with_flags += 1;
+
+                        // Count individual flags using array indexing
+                        for (i, (flag, _, _, category)) in PAGE_FLAGS.iter().enumerate() {
+                            if flags & flag != 0 {
+                                flag_counts[i] += 1;
+                                category_counts[*category as usize] += 1;
+                            }
+                        }
+                    }
+
+                    // Show progress every 1000 successful samples
+                    if successful_reads % 1000 == 0 {
+                        let progress = (successful_reads as f64 / sample_size as f64) * 100.0;
+                        println!(
+                            "Sampled {} pages so far ({:.1}% complete, {} attempts)",
+                            successful_reads.to_string().green(),
+                            progress.to_string().yellow(),
+                            attempts.to_string().dimmed()
+                        );
+                    }
+                }
+                Ok(None) => {
+                    // Page doesn't exist, continue sampling
+                    continue;
+                }
+                Err(_) => {
+                    // Error reading page, continue sampling
+                    continue;
+                }
+            }
+        }
+
+        let status_msg = if interrupt_flag.load(Ordering::Relaxed) {
+            format!(
+                "Sampling interrupted - collected {} samples from {} attempts",
+                successful_reads, attempts
+            )
+        } else if successful_reads < sample_size {
+            format!("Sampling completed - collected {} samples from {} attempts (some regions may be sparse)", successful_reads, attempts)
+        } else {
+            format!(
+                "Sampling completed successfully - {} samples from {} attempts",
+                successful_reads, attempts
+            )
+        };
+
+        println!("{}", status_msg.green().bold());
+
+        // Calculate and display sampling statistics
+        let sampling_efficiency = (successful_reads as f64 / attempts as f64) * 100.0;
+        println!(
+            "Sampling efficiency: {:.1}% ({} successful reads out of {} attempts)",
+            sampling_efficiency.to_string().cyan(),
+            successful_reads.to_string().green(),
+            attempts.to_string().yellow()
+        );
+
+        // Print sampled summary with extrapolation
+        self.print_sampled_summary(
+            successful_reads,
+            pages_with_flags,
+            &flag_counts,
+            &category_counts,
+            estimated_max_pfn,
+            show_histogram,
+        );
+
+        Ok(())
+    }
+
+    /// Estimate maximum PFN by checking system memory
+    fn estimate_max_pfn(&self) -> Result<u64, Box<dyn std::error::Error>> {
+        // Try to get total memory from /proc/meminfo
+        match get_estimated_total_pages() {
+            Ok(pages) => Ok(pages),
+            Err(_) => {
+                // Fallback: try to find the actual end by binary search
+                // This is more expensive but more accurate
+                println!("Estimating memory size by probing...");
+                Ok(self.binary_search_max_pfn()?)
+            }
+        }
+    }
+
+    /// Binary search to find the approximate maximum valid PFN
+    fn binary_search_max_pfn(&self) -> Result<u64, Box<dyn std::error::Error>> {
+        let mut low = 0u64;
+        let mut high = 100_000_000u64; // Start with 400GB assumption
+        let mut last_valid = 0u64;
+
+        // First, find an upper bound where reads consistently fail
+        while high - low > 1000 {
+            let mid = (low + high) / 2;
+
+            // Test a few pages around the midpoint
+            let mut valid_count = 0;
+            for offset in 0..10 {
+                if let Ok(Some(_)) = self.read_page_flags_const(mid + offset) {
+                    valid_count += 1;
+                    last_valid = mid + offset;
+                }
+            }
+
+            if valid_count > 0 {
+                low = mid;
+            } else {
+                high = mid;
+            }
+        }
+
+        // Add some buffer for sparse regions
+        Ok((last_valid + 10000).max(1_000_000)) // At least 1M pages
+    }
+
+    /// Read page flags without mutable self (for binary search)
+    fn read_page_flags_const(&self, pfn: u64) -> Result<Option<u64>, Box<dyn std::error::Error>> {
+        let mut file = File::open("/proc/kpageflags")?;
+        let offset = pfn * 8;
+        file.seek(SeekFrom::Start(offset))?;
+
+        match file.read_u64::<LittleEndian>() {
+            Ok(flags) => Ok(Some(flags)),
+            Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => Ok(None),
+            Err(e) => Err(Box::new(e)),
+        }
+    }
+
+    fn print_sampled_summary(
+        &self,
+        samples_collected: u32,
+        pages_with_flags: u32,
+        flag_counts: &[u32],
+        category_counts: &[u32],
+        estimated_total_pages: u64,
+        show_histogram: bool,
+    ) {
+        println!("\n{}", "=== SAMPLED SUMMARY ===".blue().bold());
+        println!(
+            "Samples collected: {}",
+            samples_collected.to_string().cyan()
+        );
+        println!(
+            "Estimated total pages in system: {}",
+            estimated_total_pages.to_string().yellow()
+        );
+        println!(
+            "Sampling coverage: {:.3}%",
+            (samples_collected as f64 / estimated_total_pages as f64 * 100.0)
+                .to_string()
+                .green()
+        );
+
+        println!("\n{}", "Sample Statistics:".blue().bold());
+        println!(
+            "Pages with flags: {} ({:.1}%)",
+            pages_with_flags.to_string().green(),
+            (pages_with_flags as f64 / samples_collected as f64 * 100.0)
+                .to_string()
+                .yellow()
+        );
+        println!(
+            "Pages without flags: {} ({:.1}%)",
+            (samples_collected - pages_with_flags).to_string().yellow(),
+            ((samples_collected - pages_with_flags) as f64 / samples_collected as f64 * 100.0)
+                .to_string()
+                .yellow()
+        );
+
+        // Extrapolate to full system
+        let extrapolation_factor = estimated_total_pages as f64 / samples_collected as f64;
+        println!("\n{}", "Extrapolated System Statistics:".blue().bold());
+        println!(
+            "Estimated pages with flags: {} ({:.1}%)",
+            ((pages_with_flags as f64 * extrapolation_factor) as u64)
+                .to_string()
+                .green(),
+            (pages_with_flags as f64 / samples_collected as f64 * 100.0)
+                .to_string()
+                .yellow()
+        );
+
+        // Find flags with non-zero counts and sort them
+        let mut flag_data: Vec<(usize, u32)> = flag_counts
+            .iter()
+            .enumerate()
+            .filter(|(_, &count)| count > 0)
+            .map(|(i, &count)| (i, count))
+            .collect();
+
+        if !flag_data.is_empty() {
+            flag_data.sort_by(|a, b| b.1.cmp(&a.1));
+
+            println!("\n{}", "Flag distribution (sampled):".blue().bold());
+            for (flag_idx, count) in &flag_data {
+                let flag_name = PAGE_FLAGS[*flag_idx].1;
+                let sample_percentage = (*count as f64 / samples_collected as f64) * 100.0;
+                let estimated_total = (*count as f64 * extrapolation_factor) as u64;
+
+                println!(
+                    "  {}: {} ({:.1}% of samples, ~{} estimated total)",
+                    flag_name.green().bold(),
+                    count.to_string().white(),
+                    sample_percentage.to_string().yellow(),
+                    estimated_total.to_string().cyan()
+                );
+            }
+
+            // Show histogram if requested
+            if show_histogram {
+                self.print_sampled_histogram(&flag_data, samples_collected, extrapolation_factor);
+            }
+        }
+
+        // Print category summary
+        self.print_sampled_category_summary(
+            category_counts,
+            samples_collected,
+            extrapolation_factor,
+        );
+    }
+
+    fn print_sampled_histogram(
+        &self,
+        flag_data: &[(usize, u32)],
+        samples_collected: u32,
+        extrapolation_factor: f64,
+    ) {
+        println!("\n{}", "=== SAMPLED HISTOGRAM ===".blue().bold());
+
+        let max_count = flag_data.iter().map(|(_, count)| *count).max().unwrap_or(1);
+        let histogram_width = 60;
+
+        // Take top 15 flags to avoid cluttering
+        let top_flags = if flag_data.len() > 15 {
+            &flag_data[..15]
+        } else {
+            flag_data
+        };
+
+        for (flag_idx, count) in top_flags {
+            let flag_name = PAGE_FLAGS[*flag_idx].1;
+            let bar_length = (*count as f64 / max_count as f64 * histogram_width as f64) as usize;
+            let sample_percentage = (*count as f64 / samples_collected as f64) * 100.0;
+            let estimated_total = (*count as f64 * extrapolation_factor) as u64;
+
+            let bar = "█".repeat(bar_length);
+            println!(
+                "{:>12}: {} {} ({:.1}%, ~{})",
+                flag_name.green().bold(),
+                bar.blue(),
+                count.to_string().white(),
+                sample_percentage.to_string().yellow(),
+                estimated_total.to_string().cyan()
+            );
+        }
+    }
+
+    fn print_sampled_category_summary(
+        &self,
+        category_counts: &[u32],
+        samples_collected: u32,
+        extrapolation_factor: f64,
+    ) {
+        // Create category data for non-zero counts
+        let mut category_data: Vec<(FlagCategory, u32)> = Vec::new();
+
+        for (i, &count) in category_counts.iter().enumerate() {
+            if count > 0 {
+                let category = match i {
+                    0 => FlagCategory::State,
+                    1 => FlagCategory::Memory,
+                    2 => FlagCategory::Usage,
+                    3 => FlagCategory::Allocation,
+                    4 => FlagCategory::IO,
+                    5 => FlagCategory::Structure,
+                    6 => FlagCategory::Special,
+                    7 => FlagCategory::Error,
+                    _ => continue,
+                };
+                category_data.push((category, count));
+            }
+        }
+
+        if !category_data.is_empty() {
+            category_data.sort_by(|a, b| b.1.cmp(&a.1));
+
+            println!("\n{}", "Flag categories (sampled):".blue().bold());
+            for (category, count) in category_data {
+                let (symbol_char, color) = get_category_symbol_and_color(category);
+                let sample_percentage = (count as f64 / samples_collected as f64) * 100.0;
+                let estimated_total = (count as f64 * extrapolation_factor) as u64;
+
+                println!(
+                    "  {} {:?}: {} ({:.1}% of samples, ~{} estimated total)",
+                    symbol_char.to_string().color(color).bold(),
+                    category,
+                    count.to_string().white(),
+                    sample_percentage.to_string().yellow(),
+                    estimated_total.to_string().cyan()
+                );
+            }
+        }
+    }
 }
 
 fn print_page_info(page: &PageInfo, verbose: bool) {
@@ -1003,6 +1369,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .action(clap::ArgAction::SetTrue),
         )
         .arg(
+            Arg::new("sampled")
+                .long("sampled")
+                .value_name("SAMPLES")
+                .help("Use sampling mode for fast statistical overview (default: 10000 samples)")
+                .default_missing_value("10000")
+                .num_args(0..=1),
+        )
+        .arg(
             Arg::new("grid")
                 .short('g')
                 .long("grid")
@@ -1062,6 +1436,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let verbose = matches.get_flag("verbose");
     let summary_only = matches.get_flag("summary");
+    let sampled_mode = matches.get_one::<String>("sampled");
     let show_grid = matches.get_flag("grid");
     let show_histogram = matches.get_flag("histogram");
     let tui_mode = matches.get_flag("tui");
@@ -1086,6 +1461,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("{}", "KPageFlags Visualizer".blue().bold());
 
     let mut reader = KPageFlagsReader::new()?;
+
+    // Use sampling mode if --sampled flag is set
+    if let Some(sample_str) = sampled_mode {
+        let sample_size: u32 = sample_str.parse().unwrap_or(10000);
+        println!(
+            "{}",
+            "Using sampling mode for fast statistical overview".green()
+        );
+        println!("Sample size: {} pages", sample_size.to_string().cyan());
+        println!("{}", "=".repeat(50).blue());
+
+        reader.scan_sampled_summary(sample_size, interrupt_flag.clone(), show_histogram)?;
+        return Ok(());
+    }
 
     // Use optimized summary-only scanning if --summary flag is set
     if summary_only {

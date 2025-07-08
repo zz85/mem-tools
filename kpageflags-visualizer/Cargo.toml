@@ -12,3 +12,4 @@ memmap2 = "0.9"
 crossterm = "0.27"
 ratatui = "0.24"
 tokio = { version = "1.0", features = ["full"] }
+rand = "0.8"
