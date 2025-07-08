@@ -41,35 +41,43 @@ impl PageCacheMonitor {
     {
         // Take snapshot before operation
         let before = MemorySnapshot::new()?;
-        
+
         // Perform the operation
         let start_time = Instant::now();
         operation().map_err(|e| crate::MemoryError::ProcMemInfoRead(e))?;
         let operation_duration = start_time.elapsed();
-        
+
         // Take snapshot after operation
         let after = MemorySnapshot::new()?;
-        
+
         // Add snapshots to history
         self.snapshots.push(before.clone());
         self.snapshots.push(after.clone());
-        
-        Ok(FileOperationAnalysis::new(before, after, operation_duration))
+
+        Ok(FileOperationAnalysis::new(
+            before,
+            after,
+            operation_duration,
+        ))
     }
 
     /// Monitor page cache behavior over time
-    pub fn monitor_for_duration(&mut self, duration: Duration, interval: Duration) -> Result<Vec<MemorySnapshot>> {
+    pub fn monitor_for_duration(
+        &mut self,
+        duration: Duration,
+        interval: Duration,
+    ) -> Result<Vec<MemorySnapshot>> {
         let mut snapshots = Vec::new();
         let start = Instant::now();
-        
+
         while start.elapsed() < duration {
             let snapshot = MemorySnapshot::new()?;
             snapshots.push(snapshot.clone());
             self.snapshots.push(snapshot);
-            
+
             std::thread::sleep(interval);
         }
-        
+
         Ok(snapshots)
     }
 
@@ -81,22 +89,28 @@ impl PageCacheMonitor {
 
         let first = &self.snapshots[0];
         let last = self.snapshots.last().unwrap();
-        
+
         let initial_cache = first.stats.page_cache_size();
         let final_cache = last.stats.page_cache_size();
         let cache_change = final_cache as i64 - initial_cache as i64;
-        
-        let max_cache = self.snapshots.iter()
+
+        let max_cache = self
+            .snapshots
+            .iter()
             .map(|s| s.stats.page_cache_size())
             .max()
             .unwrap_or(0);
-            
-        let min_cache = self.snapshots.iter()
+
+        let min_cache = self
+            .snapshots
+            .iter()
             .map(|s| s.stats.page_cache_size())
             .min()
             .unwrap_or(0);
 
-        let max_inactive_file = self.snapshots.iter()
+        let max_inactive_file = self
+            .snapshots
+            .iter()
             .map(|s| s.stats.inactive_file)
             .max()
             .unwrap_or(0);
@@ -125,7 +139,7 @@ pub struct FileOperationAnalysis {
 impl FileOperationAnalysis {
     fn new(before: MemorySnapshot, after: MemorySnapshot, operation_duration: Duration) -> Self {
         let memory_impact = MemoryImpact::calculate(&before.stats, &after.stats);
-        
+
         FileOperationAnalysis {
             before,
             after,
@@ -147,12 +161,12 @@ impl FileOperationAnalysis {
     /// Get a summary of the operation's impact
     pub fn summary(&self) -> String {
         format!(
-            "Operation took {:?} | Cache: {:+}KB | Free: {:+}KB | Inactive(file): {:+}KB | Dirty: {:+}KB",
+            "Operation took {:?} | Cache: {} | Free: {} | Inactive(file): {} | Dirty: {}",
             self.operation_duration,
-            self.memory_impact.cache_change_kb,
-            self.memory_impact.free_memory_change_kb,
-            self.memory_impact.inactive_file_change_kb,
-            self.memory_impact.dirty_change_kb
+            crate::formatting::format_memory_change_kb(self.memory_impact.cache_change_kb),
+            crate::formatting::format_memory_change_kb(self.memory_impact.free_memory_change_kb),
+            crate::formatting::format_memory_change_kb(self.memory_impact.inactive_file_change_kb),
+            crate::formatting::format_memory_change_kb(self.memory_impact.dirty_change_kb)
         )
     }
 }
@@ -240,11 +254,11 @@ impl FileOperations {
     pub fn create_test_file<P: AsRef<Path>>(path: P, size_mb: usize) -> io::Result<()> {
         let mut file = File::create(path)?;
         let chunk = vec![0u8; 1024 * 1024]; // 1MB chunk
-        
+
         for _ in 0..size_mb {
             file.write_all(&chunk)?;
         }
-        
+
         file.sync_all()?;
         Ok(())
     }
@@ -272,7 +286,7 @@ mod tests {
     fn test_page_cache_monitor_creation() {
         let monitor = PageCacheMonitor::new();
         assert!(monitor.is_ok());
-        
+
         let monitor = monitor.unwrap();
         assert_eq!(monitor.snapshots.len(), 1);
     }
@@ -307,15 +321,15 @@ mod tests {
     #[test]
     fn test_file_operations() -> io::Result<()> {
         let temp_file = NamedTempFile::new()?;
-        let test_data = b"Hello, World! This is test data for page cache monitoring.";
-        
+        let _test_data = b"Hello, World! This is test data for page cache monitoring.";
+
         // Test file creation
         FileOperations::create_test_file(temp_file.path(), 1)?;
-        
+
         // Verify file exists and has content
         let metadata = fs::metadata(temp_file.path())?;
         assert!(metadata.len() >= 1024 * 1024); // At least 1MB
-        
+
         Ok(())
     }
 }

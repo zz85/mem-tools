@@ -40,16 +40,16 @@ impl ContinuousMonitor {
             while *running_flag.lock().unwrap() {
                 if let Ok(snapshot) = MemorySnapshot::new() {
                     let mut snapshots_guard = snapshots.lock().unwrap();
-                    
+
                     // Add new snapshot
                     snapshots_guard.push_back(snapshot);
-                    
+
                     // Remove old snapshots if we exceed the limit
                     while snapshots_guard.len() > max_snapshots {
                         snapshots_guard.pop_front();
                     }
                 }
-                
+
                 thread::sleep(interval);
             }
         });
@@ -159,8 +159,12 @@ impl TrendAnalysis {
         let free_values: Vec<u64> = snapshots.iter().map(|s| s.stats.mem_free).collect();
         let used_values: Vec<u64> = snapshots.iter().map(|s| s.stats.used_memory()).collect();
         let available_values: Vec<u64> = snapshots.iter().map(|s| s.stats.mem_available).collect();
-        let cache_values: Vec<u64> = snapshots.iter().map(|s| s.stats.page_cache_size()).collect();
-        let inactive_file_values: Vec<u64> = snapshots.iter().map(|s| s.stats.inactive_file).collect();
+        let cache_values: Vec<u64> = snapshots
+            .iter()
+            .map(|s| s.stats.page_cache_size())
+            .collect();
+        let inactive_file_values: Vec<u64> =
+            snapshots.iter().map(|s| s.stats.inactive_file).collect();
         let active_file_values: Vec<u64> = snapshots.iter().map(|s| s.stats.active_file).collect();
         let dirty_values: Vec<u64> = snapshots.iter().map(|s| s.stats.dirty).collect();
 
@@ -177,7 +181,8 @@ impl TrendAnalysis {
             dirty_pages_trend: Self::calculate_trend(&dirty_values),
         };
 
-        let pressure_changes: Vec<f64> = snapshots.iter()
+        let pressure_changes: Vec<f64> = snapshots
+            .iter()
             .map(|s| s.stats.mem_available as f64 / s.stats.mem_total as f64)
             .collect();
 
@@ -212,13 +217,16 @@ impl TrendAnalysis {
 
         // Calculate volatility (standard deviation of changes)
         let volatility = if values.len() > 1 {
-            let changes: Vec<f64> = values.windows(2)
+            let changes: Vec<f64> = values
+                .windows(2)
                 .map(|w| (w[1] as f64 - w[0] as f64).abs())
                 .collect();
             let mean_change = changes.iter().sum::<f64>() / changes.len() as f64;
-            let variance = changes.iter()
+            let variance = changes
+                .iter()
                 .map(|&x| (x - mean_change).powi(2))
-                .sum::<f64>() / changes.len() as f64;
+                .sum::<f64>()
+                / changes.len() as f64;
             variance.sqrt()
         } else {
             0.0
@@ -320,7 +328,7 @@ impl EventMonitor {
 
         for condition in &mut self.conditions {
             let is_triggered = (condition.condition)(&current.stats, previous_stats);
-            
+
             if is_triggered && !condition.triggered {
                 triggered_events.push(condition.name.clone());
                 condition.triggered = true;
@@ -336,42 +344,34 @@ impl EventMonitor {
     /// Add common memory conditions
     pub fn add_common_conditions(&mut self) {
         // Low memory condition (< 10% available)
-        self.add_condition(
-            "low_memory".to_string(),
-            |stats, _| (stats.mem_available as f64 / stats.mem_total as f64) < 0.1,
-        );
+        self.add_condition("low_memory".to_string(), |stats, _| {
+            (stats.mem_available as f64 / stats.mem_total as f64) < 0.1
+        });
 
         // High page cache growth (> 100MB increase)
-        self.add_condition(
-            "high_cache_growth".to_string(),
-            |stats, prev| {
-                if let Some(prev_stats) = prev {
-                    let current_cache = stats.page_cache_size();
-                    let prev_cache = prev_stats.page_cache_size();
-                    current_cache > prev_cache + 100 * 1024 // 100MB in KB
-                } else {
-                    false
-                }
-            },
-        );
+        self.add_condition("high_cache_growth".to_string(), |stats, prev| {
+            if let Some(prev_stats) = prev {
+                let current_cache = stats.page_cache_size();
+                let prev_cache = prev_stats.page_cache_size();
+                current_cache > prev_cache + 100 * 1024 // 100MB in KB
+            } else {
+                false
+            }
+        });
 
         // High dirty pages (> 5% of total memory)
-        self.add_condition(
-            "high_dirty_pages".to_string(),
-            |stats, _| (stats.dirty as f64 / stats.mem_total as f64) > 0.05,
-        );
+        self.add_condition("high_dirty_pages".to_string(), |stats, _| {
+            (stats.dirty as f64 / stats.mem_total as f64) > 0.05
+        });
 
         // Memory pressure relief (available memory increased by > 50MB)
-        self.add_condition(
-            "memory_pressure_relief".to_string(),
-            |stats, prev| {
-                if let Some(prev_stats) = prev {
-                    stats.mem_available > prev_stats.mem_available + 50 * 1024 // 50MB in KB
-                } else {
-                    false
-                }
-            },
-        );
+        self.add_condition("memory_pressure_relief".to_string(), |stats, prev| {
+            if let Some(prev_stats) = prev {
+                stats.mem_available > prev_stats.mem_available + 50 * 1024 // 50MB in KB
+            } else {
+                false
+            }
+        });
     }
 }
 
@@ -389,7 +389,7 @@ mod tests {
     fn test_trend_calculation() {
         let values = vec![1000, 1100, 1200, 1150, 1300];
         let trend = TrendAnalysis::calculate_trend(&values);
-        
+
         assert_eq!(trend.initial_value, 1000);
         assert_eq!(trend.final_value, 1300);
         assert_eq!(trend.change, 300);
@@ -399,11 +399,10 @@ mod tests {
     #[test]
     fn test_event_monitor() {
         let mut monitor = EventMonitor::new();
-        
-        monitor.add_condition(
-            "test_condition".to_string(),
-            |stats, _| stats.mem_free < 1000,
-        );
+
+        monitor.add_condition("test_condition".to_string(), |stats, _| {
+            stats.mem_free < 1000
+        });
 
         // This test would need actual memory stats to be meaningful
         // In a real scenario, you'd mock the MemorySnapshot::new() function

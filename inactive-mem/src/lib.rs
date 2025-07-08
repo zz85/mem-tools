@@ -4,13 +4,15 @@ use std::fs;
 use std::io;
 use thiserror::Error;
 
+pub mod formatting;
 pub mod memory;
-pub mod page_cache;
 pub mod monitor;
+pub mod page_cache;
 
+pub use formatting::*;
 pub use memory::*;
-pub use page_cache::*;
 pub use monitor::*;
+pub use page_cache::*;
 
 #[derive(Error, Debug)]
 pub enum MemoryError {
@@ -77,27 +79,32 @@ impl MemoryStats {
     /// Parse /proc/meminfo content into MemoryStats
     fn parse_meminfo(content: &str) -> Result<Self> {
         let mut fields = HashMap::new();
-        
+
         for line in content.lines() {
             if let Some((key, value_str)) = line.split_once(':') {
                 let key = key.trim();
                 let value_str = value_str.trim();
-                
+
                 // Extract numeric value (remove "kB" suffix if present)
                 let value = if let Some(num_str) = value_str.split_whitespace().next() {
-                    num_str.parse::<u64>()
-                        .map_err(|_| MemoryError::ParseError(format!("Invalid number: {}", num_str)))?
+                    num_str.parse::<u64>().map_err(|_| {
+                        MemoryError::ParseError(format!("Invalid number: {}", num_str))
+                    })?
                 } else {
-                    return Err(MemoryError::ParseError(format!("No value found for {}", key)));
+                    return Err(MemoryError::ParseError(format!(
+                        "No value found for {}",
+                        key
+                    )));
                 };
-                
+
                 fields.insert(key.to_string(), value);
             }
         }
 
         // Helper function to get field value
         let get_field = |name: &str| -> Result<u64> {
-            fields.get(name)
+            fields
+                .get(name)
                 .copied()
                 .ok_or_else(|| MemoryError::FieldNotFound(name.to_string()))
         };
@@ -127,7 +134,8 @@ impl MemoryStats {
 
     /// Calculate used memory (Total - Free - Buffers - Cached)
     pub fn used_memory(&self) -> u64 {
-        self.mem_total.saturating_sub(self.mem_free + self.buffers + self.cached)
+        self.mem_total
+            .saturating_sub(self.mem_free + self.buffers + self.cached)
     }
 
     /// Calculate page cache size (Cached + Buffers)

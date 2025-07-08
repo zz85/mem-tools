@@ -10,6 +10,7 @@ A Rust crate for monitoring Linux memory metrics with a focus on page cache beha
 - **Continuous Monitoring**: Long-term memory trend analysis
 - **Event-based Monitoring**: Trigger alerts on specific memory conditions
 - **File I/O Impact Analysis**: Understand how file operations affect memory
+- **Human-readable Formatting**: Numbers displayed with comma separators and appropriate units
 
 ## Key Memory Metrics Tracked
 

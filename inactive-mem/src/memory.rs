@@ -45,17 +45,19 @@ impl MemoryDiff {
     /// Calculate difference between two memory snapshots
     pub fn between(before: &MemorySnapshot, after: &MemorySnapshot) -> Self {
         let duration_ms = after.timestamp.saturating_sub(before.timestamp);
-        
+
         MemoryDiff {
             duration_ms,
             mem_free_diff: after.stats.mem_free as i64 - before.stats.mem_free as i64,
             cached_diff: after.stats.cached as i64 - before.stats.cached as i64,
             buffers_diff: after.stats.buffers as i64 - before.stats.buffers as i64,
-            inactive_file_diff: after.stats.inactive_file as i64 - before.stats.inactive_file as i64,
+            inactive_file_diff: after.stats.inactive_file as i64
+                - before.stats.inactive_file as i64,
             active_file_diff: after.stats.active_file as i64 - before.stats.active_file as i64,
             dirty_diff: after.stats.dirty as i64 - before.stats.dirty as i64,
             writeback_diff: after.stats.writeback as i64 - before.stats.writeback as i64,
-            page_cache_diff: (after.stats.page_cache_size() as i64) - (before.stats.page_cache_size() as i64),
+            page_cache_diff: (after.stats.page_cache_size() as i64)
+                - (before.stats.page_cache_size() as i64),
         }
     }
 
@@ -77,12 +79,12 @@ impl MemoryDiff {
     /// Format the diff as a human-readable string
     pub fn format_summary(&self) -> String {
         format!(
-            "Duration: {}ms | Free: {:+}KB | Cache: {:+}KB | Inactive(file): {:+}KB | Dirty: {:+}KB",
-            self.duration_ms,
-            self.mem_free_diff,
-            self.cached_diff,
-            self.inactive_file_diff,
-            self.dirty_diff
+            "Duration: {}ms | Free: {} | Cache: {} | Inactive(file): {} | Dirty: {}",
+            crate::formatting::format_number(self.duration_ms),
+            crate::formatting::format_memory_change_kb(self.mem_free_diff),
+            crate::formatting::format_memory_change_kb(self.cached_diff),
+            crate::formatting::format_memory_change_kb(self.inactive_file_diff),
+            crate::formatting::format_memory_change_kb(self.dirty_diff)
         )
     }
 }
@@ -90,10 +92,10 @@ impl MemoryDiff {
 /// Memory pressure indicators
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MemoryPressure {
-    pub available_ratio: f64,    // MemAvailable / MemTotal
-    pub free_ratio: f64,         // MemFree / MemTotal
-    pub cache_ratio: f64,        // (Cached + Buffers) / MemTotal
-    pub dirty_ratio: f64,        // Dirty / MemTotal
+    pub available_ratio: f64,     // MemAvailable / MemTotal
+    pub free_ratio: f64,          // MemFree / MemTotal
+    pub cache_ratio: f64,         // (Cached + Buffers) / MemTotal
+    pub dirty_ratio: f64,         // Dirty / MemTotal
     pub inactive_file_ratio: f64, // Inactive(file) / MemTotal
     pub pressure_level: PressureLevel,
 }
@@ -168,10 +170,10 @@ impl MemoryUtils {
     pub fn process_memory_info(pid: u32) -> std::io::Result<ProcessMemoryInfo> {
         let status_path = format!("/proc/{}/status", pid);
         let content = std::fs::read_to_string(status_path)?;
-        
+
         let mut vm_rss = 0;
         let mut vm_size = 0;
-        
+
         for line in content.lines() {
             if let Some(value_str) = line.strip_prefix("VmRSS:") {
                 if let Some(num_str) = value_str.trim().split_whitespace().next() {
