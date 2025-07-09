@@ -1,4 +1,5 @@
 use linux_memory_monitor::*;
+use std::env;
 use std::fs::File;
 use std::io::Write;
 use std::thread;
@@ -8,20 +9,18 @@ fn main() -> Result<()> {
     println!("Linux Memory Monitor - Continuous Inactive Memory Generation");
     println!("===========================================================\n");
 
-    let interval = Duration::from_secs(3); // Stats interval (not used for pausing anymore)
+    // Parse command line arguments
+    let args: Vec<String> = env::args().collect();
+    let (file_size_gb, max_files, target_inactive_gb) = parse_args(&args);
+
     let mut file_counter = 0;
-    let file_size_gb = 1; // Create 1GB files each time
-    let max_files = 20; // Maximum number of files to create before cleanup
-    let target_inactive_gb = 50; // Stop after generating this much new inactive memory
+    let mut created_files = Vec::new();
 
     println!("Configuration:");
     println!("  File size: {} GB per file", file_size_gb);
-    println!("  No pause between files - running at maximum speed!");
     println!("  Max files before cleanup: {}", max_files);
-    println!(
-        "  Will stop after generating {} GB of new inactive memory\n",
-        target_inactive_gb
-    );
+    println!("  Target inactive memory: {} GB", target_inactive_gb);
+    println!("  No pause between files - running at maximum speed!\n");
 
     // Show initial state
     let initial_stats = MemoryStats::current()?;
@@ -29,8 +28,6 @@ fn main() -> Result<()> {
     print_memory_stats("INITIAL STATE", &initial_stats);
 
     let start_time = Instant::now();
-    let mut created_files = Vec::new();
-    let mut total_new_inactive = 0.0;
 
     loop {
         // Create a large file to generate inactive memory
@@ -60,7 +57,7 @@ fn main() -> Result<()> {
 
         // Calculate progress
         let current_inactive_gb = current_stats.inactive_file as f64 / (1024.0 * 1024.0);
-        total_new_inactive = current_inactive_gb - initial_inactive_gb;
+        let total_new_inactive = current_inactive_gb - initial_inactive_gb;
         let total_runtime = start_time.elapsed();
 
         println!("\n📊 PROGRESS SUMMARY:");
@@ -119,15 +116,15 @@ fn main() -> Result<()> {
             PressureLevel::High | PressureLevel::Critical => {
                 println!("\n⚠️  HIGH MEMORY PRESSURE DETECTED!");
                 println!("   Available: {:.1}%", pressure.available_ratio * 100.0);
-                println!("   Stopping to prevent system issues.");
-                break;
+                println!("   Slowing down file creation...");
+                thread::sleep(Duration::from_secs(10));
             }
             PressureLevel::Medium => {
                 println!("\n⚡ Medium memory pressure - continuing with caution");
                 thread::sleep(Duration::from_secs(2));
             }
             PressureLevel::Low => {
-                // Continue at normal pace
+                // Continue at full speed - no pause
             }
         }
 
@@ -170,6 +167,111 @@ fn main() -> Result<()> {
     println!("✅ Cleanup complete!");
 
     Ok(())
+}
+
+fn parse_args(args: &[String]) -> (usize, usize, usize) {
+    if args.len() == 1 {
+        // No arguments provided, show usage
+        print_usage(&args[0]);
+        std::process::exit(1);
+    }
+
+    let mut file_size_gb = 1;
+    let mut max_files = 20;
+    let mut target_inactive_gb = 50;
+
+    let mut i = 1;
+    while i < args.len() {
+        match args[i].as_str() {
+            "-s" | "--size" => {
+                if i + 1 < args.len() {
+                    match args[i + 1].parse::<usize>() {
+                        Ok(size) if size > 0 => file_size_gb = size,
+                        _ => {
+                            eprintln!("Error: Invalid file size. Must be a positive integer.");
+                            std::process::exit(1);
+                        }
+                    }
+                    i += 2;
+                } else {
+                    eprintln!("Error: --size requires a value");
+                    std::process::exit(1);
+                }
+            }
+            "-f" | "--files" => {
+                if i + 1 < args.len() {
+                    match args[i + 1].parse::<usize>() {
+                        Ok(files) if files > 0 => max_files = files,
+                        _ => {
+                            eprintln!("Error: Invalid max files. Must be a positive integer.");
+                            std::process::exit(1);
+                        }
+                    }
+                    i += 2;
+                } else {
+                    eprintln!("Error: --files requires a value");
+                    std::process::exit(1);
+                }
+            }
+            "-t" | "--target" => {
+                if i + 1 < args.len() {
+                    match args[i + 1].parse::<usize>() {
+                        Ok(target) if target > 0 => target_inactive_gb = target,
+                        _ => {
+                            eprintln!("Error: Invalid target. Must be a positive integer.");
+                            std::process::exit(1);
+                        }
+                    }
+                    i += 2;
+                } else {
+                    eprintln!("Error: --target requires a value");
+                    std::process::exit(1);
+                }
+            }
+            "-h" | "--help" => {
+                print_usage(&args[0]);
+                std::process::exit(0);
+            }
+            _ => {
+                eprintln!("Error: Unknown argument '{}'", args[i]);
+                print_usage(&args[0]);
+                std::process::exit(1);
+            }
+        }
+    }
+
+    (file_size_gb, max_files, target_inactive_gb)
+}
+
+fn print_usage(program_name: &str) {
+    println!("Linux Memory Monitor - Inactive Memory Generation Tool");
+    println!();
+    println!("USAGE:");
+    println!("    {} [OPTIONS]", program_name);
+    println!();
+    println!("OPTIONS:");
+    println!("    -s, --size <GB>      Size of each test file in GB (default: 1)");
+    println!("    -f, --files <NUM>    Maximum number of files before cleanup (default: 20)");
+    println!(
+        "    -t, --target <GB>    Target amount of new inactive memory to generate in GB (default: 50)"
+    );
+    println!("    -h, --help           Show this help message");
+    println!();
+    println!("EXAMPLES:");
+    println!("    {} --size 2 --files 10 --target 20", program_name);
+    println!("        Create 2GB files, keep max 10 files, target 20GB inactive memory");
+    println!();
+    println!("    {} -s 5 -t 100", program_name);
+    println!("        Create 5GB files, target 100GB inactive memory");
+    println!();
+    println!("    {} --size 1 --files 50 --target 25", program_name);
+    println!("        Create 1GB files, keep max 50 files, target 25GB inactive memory");
+    println!();
+    println!("DESCRIPTION:");
+    println!("    This tool creates large files to generate inactive file memory in Linux,");
+    println!("    demonstrating how the kernel manages page cache and memory pressure.");
+    println!("    It monitors memory statistics in real-time and shows the impact of");
+    println!("    file I/O operations on system memory usage.");
 }
 
 fn create_large_file(path: &str, size_gb: usize) -> std::io::Result<()> {
@@ -284,5 +386,23 @@ mod tests {
         assert_eq!(stats.used_memory(), 4000000); // 8M - 2M - 0.5M - 1.5M
         assert_eq!(stats.page_cache_size(), 2000000); // 1.5M + 0.5M
         assert_eq!(stats.memory_utilization(), 50.0); // 4M / 8M * 100
+    }
+
+    #[test]
+    fn test_parse_args() {
+        let args = vec![
+            "program".to_string(),
+            "--size".to_string(),
+            "5".to_string(),
+            "--files".to_string(),
+            "30".to_string(),
+            "--target".to_string(),
+            "100".to_string(),
+        ];
+
+        let (size, files, target) = parse_args(&args);
+        assert_eq!(size, 5);
+        assert_eq!(files, 30);
+        assert_eq!(target, 100);
     }
 }
